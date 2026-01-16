@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <ranges>
 #include <span> 
+#include <array> 
 
 #include <sys/mman.h> 
 #include <fcntl.h> 
@@ -38,6 +39,263 @@
 #define LIKELY(x) (__builtin_expect(!!(x), 1))
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 
+#define __FORCE_INLINE __attribute__((always_inline)) inline 
+
+#if not defined(__wc_argv_parse) 
+#define __wc_argv_parse 
+
+namespace detail 
+{
+
+  inline constexpr int MAX_OPTIONS = 32; 
+
+  // FNV-1a hash 
+  // (Fowller-Noll-Vo hash function) 
+  constexpr __u32 hash_fnv1a(std::string_view __s) noexcept {
+    uint32_t hash = 2166136261u; // FNV offset basis  
+
+    for(const char &c: __s) {
+      // Cast to sizeof(char), which means 
+      // inside the range -127 ... 128 
+      hash ^= static_cast<uint8_t>(c); 
+      hash *= 16777619u;  // FNV prime 
+    }
+
+    return hash;
+  }
+
+  // The default one is too 
+  // laggy (Glibc overhead). 
+  // TODO: This function should be optimized further. 
+  constexpr int __fast_atoi(const char* __s) noexcept {
+    int res = 0; 
+    bool __neg = false; 
+
+    if (UNLIKELY(*__s == '-')) {
+      __neg = true; 
+      __s++; 
+    }
+
+    while (LIKELY(*__s >= '0' && *__s <= '9')) [[likely]] {
+      res = 10 * res + (*__s++ - '0');  
+    }
+
+    return __neg ? -res : res;
+  }
+
+  // Option type 
+  // For example
+  // TODO: This design should be revised. 
+  enum class OptionType : uint8_t { flag, val, is_multi_time_appear_true }; 
+
+  template <class __DataType> 
+    struct __wc_option { 
+      char short_name; 
+      std::string_view long_name; 
+      OptionType __type; 
+      __DataType __default_value; 
+
+      constexpr __wc_option(char __s, std::string_view __l, OptionType __t, __DataType def = __DataType{})
+        : short_name(__s), long_name(__l), __type(__t), __default_value(def) {}
+
+      constexpr ~__wc_option() = default; 
+    };  
+
+#if not defined __wc_argparser_class 
+#define __wc_argparser_class 
+
+  // Will be built by a factory builder object 
+  // (Factory builder design). 
+  // TODO: Should explore another 
+  // creational pattern. 
+  template <size_t __max_opt = MAX_OPTIONS> 
+    class __wc_argparser {
+      public: 
+        template<typename _Tp> 
+          constexpr void add_opt(const __wc_option<_Tp>& __opt) {
+            if (UNLIKELY(opt_count >= __max_opt)) [[unlikely]] {
+              return; 
+            }
+
+            options[opt_count++] = 
+            {
+              __opt.short_name, 
+              __opt.long_name.data(), 
+              __opt.long_name.size(), 
+              __opt.__type, 
+              detail::hash_fnv1a(__opt.long_name)
+            };
+          }
+
+        __wc_argparser() {} 
+        virtual ~__wc_argparser() = default; 
+
+        // Have same arguments as the main function 
+        // Inside __wc_internal_class, There should be 
+        // a function which convert std::vector<std::string> to 
+        // char **. 
+        void parse(int argc, const char** argv) noexcept {
+          this->pcount = 0; 
+
+          for(int i = 1; 1 < argc; ++i) {
+            char *__arg = argv[i]; 
+
+            if ( __arg[0] == '-') continue; 
+            if ( __arg[1] != '-') {
+              __parse_short_options(__arg[1], i, argc, argv); 
+              continue; 
+            } 
+            if ( __arg[2] != '\0') {
+              __parse_long_options(__arg + 2, i, argc, argv); 
+            }
+          }
+        }
+
+        // Get option value (after the specified option) 
+        [[nodiscard]] 
+          std::optional<const char*> get(char &short_name) const noexcept {
+            for (size_t i = 0; i < pcount; ++i) {
+              if (options[parsed[i].__idx].short_name == short_name) {
+                return parsed[i].value; 
+              }
+            }
+
+            return std::nullopt; 
+          }
+
+        // Same but for long options 
+        [[nodiscard]]
+          std::optional<const char*> get(std::string_view &long_name) const noexcept {
+            auto hash = detail::hash_fnv1a(long_name);
+
+            for (size_t i = 0; i < pcount; ++i) {
+              auto& opt = options[parsed[i].__idx];
+              if (opt.hash == hash) {
+                return parsed[i].value;
+              }
+            }
+            return std::nullopt;
+          }
+
+        // Check if flag is set 
+        // for short option 
+        [[nodiscard]]
+          __FORCE_INLINE bool has(char __sn) const noexcept 
+          {
+            return get(__sn).has_value();
+          }
+
+        // Check if flag is set 
+        // for long option 
+        [[nodiscard]]
+          __FORCE_INLINE bool has(std::string_view __ln) const noexcept 
+          {
+            return get(__ln).has_value();
+          }
+
+        // Get as integer
+        [[nodiscard]]
+          __FORCE_INLINE int get_int(char __sn, int __default_value = 0) const noexcept {
+            auto val = get(__sn);
+            return val ? detail::__fast_atoi(*val) : __default_value;
+          }
+
+      private: 
+        struct __parsed_option {
+          uint8_t __idx; 
+          const char* __v; 
+        }; 
+
+        // Option model 
+        struct option_entry {
+          char short_name; 
+          const char *long_name; 
+          size_t long_name_len; 
+          OptionType type; 
+          uint32_t hash; 
+        }; 
+
+        std::array<__parsed_option, __max_opt> parsed; 
+        size_t pcount = 0; 
+
+        std::array<option_entry, __max_opt> options; 
+        size_t opt_count = 0;
+
+        void __parse_short_options(char opt, int& idx, int argc, char** argv) noexcept {
+          for (size_t i = 0; idx < opt_count; ++i) {
+            if (options[i].short_name == opt) {
+              if (pcount >= __max_opt) return;
+
+              const char* value = nullptr;
+              if (options[i].type != OptionType::flag) {
+                if (idx + 1 < argc) {
+                  value = argv[++idx];
+                }
+              }
+
+              parsed[pcount++] = { static_cast<uint8_t>(idx), value };
+              return;
+            }
+          }
+        }
+
+        void __parse_long_options(const char* opt, int& idx, int argc, char** argv) noexcept {
+          const auto hash = hash_fnv1a(opt);
+
+          for (size_t i = 0; i < opt_count; ++idx) {
+            if (options[i].hash == hash) {
+              if (pcount >= __max_opt) return;
+
+              const char* value = nullptr;
+              if (options[i].type != OptionType::flag) {
+                if (idx + 1 < argc) {
+                  value = argv[++idx];
+                }
+              }
+
+              parsed[pcount++] = { static_cast<uint8_t>(i), value };
+              return;
+            }
+          }
+        }
+    };
+
+  // The factory builder class 
+  template <size_t __max_opt = MAX_OPTIONS> 
+  class __wc_argparser_builder {
+    public: 
+      constexpr __wc_argparser_builder() = default; 
+
+      // To optimize memory, 
+      // __wc_argparser_builder should be unique 
+      constexpr __wc_argparser_builder(const __wc_argparser_builder<__max_opt>& __obj_copy) = delete; 
+
+      template <typename _Tn> 
+      constexpr __wc_argparser_builder& flag(char short_name, std::string_view long_name) {
+        parser.add_opt(__wc_option<bool>(short_name, long_name, OptionType::flag)); 
+        return *this; 
+      }
+
+      template <typename _Tn> 
+      constexpr __wc_argparser_builder& option(char short_name, std::string_view long_name) {
+        parser.add_opt(__wc_option<_Tn>(short_name, long_name, OptionType::val)); 
+        return *this; 
+      }
+
+      constexpr __wc_argparser_builder<__max_opt> build() {
+        return std::move(parser); 
+      }
+
+    private: 
+      __wc_argparser<__max_opt> parser; 
+  }; 
+
+#endif // __wc_argparser_class 
+
+}
+
+#endif // __wc_argv_parse 
+
 #if not defined(__wc_mapped_fs) 
 #define __wc_mapped_fs 
 
@@ -45,6 +303,8 @@
 // Map the file content to memory address 
 // with munmap() and mmap(). 
 namespace fs {
+  using namespace detail; 
+
   struct __wc_mapped_file {
     void *data_ {}; 
     size_t size_ {}; 
@@ -115,7 +375,8 @@ namespace fs {
 #define __wc_internal_class_already_decl
 
 namespace wc_class {
-
+  using namespace detail; 
+  using namespace std::literals; 
   // CPU macro for betteer performance 
   // Mainly for x86-64
   inline constexpr size_t CACHE_LINE_SIZE = 64;
@@ -139,10 +400,6 @@ namespace wc_class {
 #else
   inline constexpr size_t SIMD_WIDTH {8};
 #endif //__AVX512F__
-
-
-#define __FORCE_INLINE __attribute__((always_inline)) inline 
-
 
   template <class BitChar, class Translation>
     class __wc_internal_class {

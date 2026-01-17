@@ -1,3 +1,21 @@
+/*
+ *
+ *  Copyright (C) 2026, Sergio Randriamihoatra
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif // _GNU_SOURCE
@@ -137,10 +155,10 @@ namespace detail
         void parse(int argc, const char** argv) noexcept {
           this->pcount = 0; 
 
-          for(int i = 1; 1 < argc; ++i) {
-            char *__arg = argv[i]; 
+          for(int i = 1; i < argc; ++i) {
+            const char *__arg = argv[i]; 
 
-            if ( __arg[0] == '-') continue; 
+            if ( __arg[0] != '-') continue; 
             if ( __arg[1] != '-') {
               __parse_short_options(__arg[1], i, argc, argv); 
               continue; 
@@ -156,7 +174,7 @@ namespace detail
           std::optional<const char*> get(char &short_name) const noexcept {
             for (size_t i = 0; i < pcount; ++i) {
               if (options[parsed[i].__idx].short_name == short_name) {
-                return parsed[i].value; 
+                return parsed[i].__v; 
               }
             }
 
@@ -221,8 +239,8 @@ namespace detail
         std::array<option_entry, __max_opt> options; 
         size_t opt_count = 0;
 
-        void __parse_short_options(char opt, int& idx, int argc, char** argv) noexcept {
-          for (size_t i = 0; idx < opt_count; ++i) {
+        void __parse_short_options(char opt, int& idx, int argc, const char** argv) noexcept {
+          for (size_t i = 0; i < opt_count; ++i) {
             if (options[i].short_name == opt) {
               if (pcount >= __max_opt) return;
 
@@ -233,16 +251,16 @@ namespace detail
                 }
               }
 
-              parsed[pcount++] = { static_cast<uint8_t>(idx), value };
+              parsed[pcount++] = { static_cast<uint8_t>(i), value };
               return;
             }
           }
         }
 
-        void __parse_long_options(const char* opt, int& idx, int argc, char** argv) noexcept {
+        void __parse_long_options(const char* opt, int& idx, int argc, const char** argv) noexcept {
           const auto hash = hash_fnv1a(opt);
 
-          for (size_t i = 0; i < opt_count; ++idx) {
+          for (size_t i = 0; i < opt_count; ++i) {
             if (options[i].hash == hash) {
               if (pcount >= __max_opt) return;
 
@@ -262,33 +280,33 @@ namespace detail
 
   // The factory builder class 
   template <size_t __max_opt = MAX_OPTIONS> 
-  class __wc_argparser_builder {
-    public: 
-      constexpr __wc_argparser_builder() = default; 
+    class __wc_argparser_builder {
+      public: 
+        constexpr __wc_argparser_builder() = default; 
 
-      // To optimize memory, 
-      // __wc_argparser_builder should be unique 
-      constexpr __wc_argparser_builder(const __wc_argparser_builder<__max_opt>& __obj_copy) = delete; 
+        // To optimize memory, 
+        // __wc_argparser_builder should be unique 
+        //constexpr __wc_argparser_builder(const __wc_argparser_builder<__max_opt>& __obj_copy) = delete; 
 
-      template <typename _Tn> 
-      constexpr __wc_argparser_builder& flag(char short_name, std::string_view long_name) {
-        parser.add_opt(__wc_option<bool>(short_name, long_name, OptionType::flag)); 
-        return *this; 
-      }
+        template <typename _Tn> 
+          constexpr __wc_argparser_builder& flag(char short_name, std::string_view long_name) {
+            parser.add_opt(__wc_option<bool>(short_name, long_name, OptionType::flag)); 
+            return *this; 
+          }
 
-      template <typename _Tn> 
-      constexpr __wc_argparser_builder& option(char short_name, std::string_view long_name) {
-        parser.add_opt(__wc_option<_Tn>(short_name, long_name, OptionType::val)); 
-        return *this; 
-      }
+        template <typename _Tn> 
+          constexpr __wc_argparser_builder& option(char short_name, std::string_view long_name) {
+            parser.add_opt(__wc_option<_Tn>(short_name, long_name, OptionType::val)); 
+            return *this; 
+          }
 
-      constexpr __wc_argparser_builder<__max_opt> build() {
-        return std::move(parser); 
-      }
+        constexpr __wc_argparser<__max_opt> build() {
+          return std::move(parser); 
+        }
 
-    private: 
-      __wc_argparser<__max_opt> parser; 
-  }; 
+      private: 
+        __wc_argparser<__max_opt> parser; 
+    }; 
 
 #endif // __wc_argparser_class 
 
@@ -376,7 +394,8 @@ namespace fs {
 
 namespace wc_class {
   using namespace detail; 
-  using namespace std::literals; 
+  using namespace std::literals;
+
   // CPU macro for betteer performance 
   // Mainly for x86-64
   inline constexpr size_t CACHE_LINE_SIZE = 64;
@@ -694,7 +713,7 @@ namespace wc_class {
           __FORCE_INLINE 
             size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
               size_t __l_count {};
-              auto __data = mapped_file[1].as_span(); 
+              auto __data = mapped_file[0].as_span(); 
               const char* ptr = __data.data();
               const char* end = ptr + __data.size();
 
@@ -774,10 +793,9 @@ namespace wc_class {
                     (ptr[24] == '\n') + (ptr[25] == '\n') +
                     (ptr[26] == '\n') + (ptr[27] == '\n') + 
                     (ptr[28] == '\n') + (ptr[29] == '\n') +
-                    (ptr[30] == '\n') + (ptr[31] == '\n') + 
-                    (ptr[32] == '\n');
+                    (ptr[30] == '\n') + (ptr[31] == '\n');  
 
-                  ptr += 16;
+                  ptr += 32;
                 }
 
                 // Handle remainder
@@ -796,8 +814,14 @@ namespace wc_class {
               // Global wrapper for every command line options
               size_t wc(Translation translation = std::identity{})
               {
+                size_t total = 0; 
+
                 __parse_argv(); 
-                return __wc_line_1(); 
+                if (count_line) {
+                  total += __wc_line_1(); 
+                }
+
+                return total; 
               }
 
               private:
@@ -817,6 +841,7 @@ namespace wc_class {
               bool count_line; 
               bool count_bytes; 
               bool count_char; 
+              bool count_word; 
 
               std::vector<fs::__wc_mapped_file> mapped_file; 
 
@@ -824,8 +849,36 @@ namespace wc_class {
               //
               // argv is already a member of the class
               inline void __parse_argv() {
-                for (const std::string &s: this->argv) {
-                  if (s[0] != '-') mapped_file.push_back(fs::__wc_mapped_file(s)); 
+                auto pb = __wc_argparser_builder<>()
+                  .flag<bool>('l', "line"sv) 
+                  .flag<bool>('c', "bytes"sv)
+                  .flag<bool>('m', "chars"sv)
+                  .flag<bool>('w', "words"sv); 
+
+
+                auto parser = pb.build(); 
+
+                // Need to convert back to const char ** 
+                std::vector<const char*> __argv; 
+                for(const auto& arg : argv) {
+                  __argv.push_back(arg.c_str()); 
+                }
+
+                parser.parse(this->argc, __argv.data()); 
+
+                // Set flags from the parser object 
+                count_line = parser.has('l'); 
+                count_bytes = parser.has('c'); 
+                count_char = parser.has('m'); 
+                count_word = parser.has('w');
+
+                if (UNLIKELY(!count_word && !count_char && !count_line && !count_bytes)) [[unlikely]] {
+                  count_bytes = true; 
+                }
+
+                mapped_file.clear();
+                for (const std::string &s: argv) {
+                  if (s[0] != '-' && s != argv[0]) mapped_file.push_back(fs::__wc_mapped_file(s)); 
                 }
               }
             };

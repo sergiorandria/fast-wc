@@ -171,7 +171,7 @@ namespace detail
 
         // Get option value (after the specified option) 
         [[nodiscard]] 
-          std::optional<const char*> get(char &short_name) const noexcept {
+          std::optional<const char*> get(char short_name) const noexcept {
             for (size_t i = 0; i < pcount; ++i) {
               if (options[parsed[i].__idx].short_name == short_name) {
                 return parsed[i].__v; 
@@ -183,13 +183,13 @@ namespace detail
 
         // Same but for long options 
         [[nodiscard]]
-          std::optional<const char*> get(std::string_view &long_name) const noexcept {
+          std::optional<const char*> get(std::string_view long_name) const noexcept {
             auto hash = detail::hash_fnv1a(long_name);
 
             for (size_t i = 0; i < pcount; ++i) {
               auto& opt = options[parsed[i].__idx];
               if (opt.hash == hash) {
-                return parsed[i].value;
+                return parsed[i].__v;
               }
             }
             return std::nullopt;
@@ -258,7 +258,7 @@ namespace detail
         }
 
         void __parse_long_options(const char* opt, int& idx, int argc, const char** argv) noexcept {
-          const auto hash = hash_fnv1a(opt);
+          const auto hash = detail::hash_fnv1a(opt);
 
           for (size_t i = 0; i < opt_count; ++i) {
             if (options[i].hash == hash) {
@@ -501,7 +501,8 @@ namespace wc_class {
 #else   
           // Do not remove this semicolon
           ;
-          std::vector<std::string> args(views.begin(), views.end()); 
+          std::vector<std::string> args(views.begin(), views.end());
+          this->argv = args; 
 #endif // __cplusplus
         }
 
@@ -581,14 +582,11 @@ namespace wc_class {
        // Just fstat() system call. 
        // Works with -c
           size_t __wc_char_1(Translation translation = std::identity{}) { 
-            struct statx st; 
-
-            if (statx(AT_FDCWD, this->argv[1].c_str(), 0, STATX_SIZE, &st) == 0) 
-            {
-              return st.stx_size; 
+            if (mapped_file.empty() || !mapped_file[0].valid()) {
+              return 0; 
             }
 
-            return size_t(0);
+            return mapped_file[0].size(); 
           }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -674,13 +672,15 @@ namespace wc_class {
           // Slightly better (Use inline assembly)
           __FORCE_INLINE
             size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
+              if (mapped_file.empty() || !mapped_file[0].valid()) {
+                return 0; 
+              }
+
               size_t __l_count {};
-              size_t size = 
-
-                // argv[1] is a std::string
-                char *data = this->argv[1]; 
-
-              const char* ptr = data, *end = data + size;
+              auto __data = mapped_file[0].as_span(); 
+              const char *ptr = __data.data(); 
+              const char *end = ptr + __data.size(); 
+              
               const __m512i newline = _mm512_set1_epi8('\n');
 
               // Process 64 bytes at a time
@@ -712,6 +712,11 @@ namespace wc_class {
         [[gnu::target("avx2")]]
           __FORCE_INLINE 
             size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
+              if (mapped_file.empty() || !mapped_file[0].valid()) {
+                return 0; 
+              }
+
+
               size_t __l_count {};
               auto __data = mapped_file[0].as_span(); 
               const char* ptr = __data.data();
@@ -745,13 +750,19 @@ namespace wc_class {
         //  x86-64 CPU.
         [[gnu::target("sse2")]]
           __FORCE_INLINE 
-            size_t __wc_line_1(std::span<const char> data) noexcept {
+            size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
+              if (mapped_file.empty() || !mapped_file[0].valid()) {
+                return 0; 
+              }
+
               size_t __l_count {};
-              auto __data = mapped_file[1].as_span(); 
+              auto __data = mapped_file[0].as_span(); 
               const char* ptr = __data.data();
               const char* end = ptr + __data.size();
 
-              const __m128i newline = _mm_set1_epi8('\n');
+              const __m128i newline = _mm_set1_epi8('\n'); 
+
+              std::cout << "Used SSE2" << std::endl; 
 
               while (LIKELY(ptr + 16 <= end)) {
                 __builtin_prefetch(ptr + 64, 0, 3);
@@ -770,12 +781,15 @@ namespace wc_class {
 
               return __l_count;
 #else // Fallback to a scalar implementation 
-              __FORCE_INLINE size_t count_scalar(std::span<const char> data) noexcept {
+              __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
                 size_t __l_count {};
-                auto __data = mapped_file[1].as_span(); 
+                auto __data = mapped_file[0].as_span(); 
                 const char* ptr = __data.data();
                 const char* end = ptr + __data.size();
 
+              
+                std::cout << "Used SSE2" << std::endl; 
+                
                 // Process 32 bytes at a time (Ah the motherfucker)
                 while (LIKELY(ptr + 32 <= end)) {
                   __l_count += (ptr[0] == '\n') + (ptr[1] == '\n') + 
@@ -803,7 +817,7 @@ namespace wc_class {
                   __l_count += (*ptr++ == '\n');
                 }
 
-                return count;
+                return __l_count;
               }
 #endif // __AVX512F__
 
@@ -814,11 +828,18 @@ namespace wc_class {
               // Global wrapper for every command line options
               size_t wc(Translation translation = std::identity{})
               {
+                size_t var {}; 
                 size_t total = 0; 
 
-                __parse_argv(); 
+                __parse_argv();
                 if (count_line) {
-                  total += __wc_line_1(); 
+                  var = __wc_line_1();
+                  std::cout << "Line: \t" << var << '\t' << std::endl; 
+                }
+
+                if (count_bytes) {
+                  var = __wc_char_1(); 
+                  std::cout << "Bytes: \t" << var << '\t' << std::endl; 
                 }
 
                 return total; 
@@ -949,7 +970,7 @@ namespace wc_class {
     auto start = std::chrono::high_resolution_clock::now();  
     auto res = __wcObject0->wc();
 
-    std::cout << res << std::endl; 
+    std::cout << "Total:" << res << std::endl; 
     auto end = std::chrono::high_resolution_clock::now(); 
 
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start); 

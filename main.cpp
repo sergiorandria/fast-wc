@@ -328,11 +328,13 @@ namespace fs {
     size_t size_ {}; 
     int __fd = -1; 
 
-    explicit __wc_mapped_file(std::string_view __fn) {
-      struct stat __sb; 
-      std::string filename(__fn); 
+    std::string filename_; 
 
-      if (UNLIKELY((__fd = open(filename.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
+    explicit __wc_mapped_file(std::string_view __fn)
+      :  filename_(__fn) { 
+      struct stat __sb; 
+
+      if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
         return; 
       } 
 
@@ -370,19 +372,24 @@ namespace fs {
 
     virtual ~__wc_mapped_file() {}
 
-    [[nodiscard]] std::span<const char> as_span() const noexcept 
+    [[nodiscard]] __FORCE_INLINE std::span<const char> as_span() const noexcept 
     {
-      return {static_cast<const char*>(data_), size_};
+      return { static_cast<const char*>(data_), size_ };
     }
 
-    [[nodiscard]] bool valid() const noexcept 
+    [[nodiscard]] __FORCE_INLINE bool valid() const noexcept 
     {
       return data_ != nullptr; 
     }
 
-    [[nodiscard]] size_t size() const noexcept 
+    [[nodiscard]] __FORCE_INLINE size_t size() const noexcept 
     {
       return size_; 
+    }
+
+    [[nodiscard]] __FORCE_INLINE std::string filename() const noexcept 
+    {
+      return filename_; 
     }
   };
 }
@@ -581,12 +588,12 @@ namespace wc_class {
        // Very simple and blazingly fast trick 
        // Just fstat() system call. 
        // Works with -c
-          size_t __wc_char_1(Translation translation = std::identity{}) { 
-            if (mapped_file.empty() || !mapped_file[0].valid()) {
+          size_t __wc_char_1(Translation translation = std::identity{}, size_t f_idx = 0) { 
+            if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
               return 0; 
             }
 
-            return mapped_file[0].size(); 
+            return mapped_file[f_idx].size(); 
           }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -671,13 +678,13 @@ namespace wc_class {
           // Using AVX512
           // Slightly better (Use inline assembly)
           __FORCE_INLINE
-            size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
-              if (mapped_file.empty() || !mapped_file[0].valid()) {
+            size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+              if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
                 return 0; 
               }
 
               size_t __l_count {};
-              auto __data = mapped_file[0].as_span(); 
+              auto __data = mapped_file[f_idx].as_span(); 
               const char *ptr = __data.data(); 
               const char *end = ptr + __data.size(); 
               
@@ -711,14 +718,14 @@ namespace wc_class {
 #elif defined(__AVX2__) 
         [[gnu::target("avx2")]]
           __FORCE_INLINE 
-            size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
-              if (mapped_file.empty() || !mapped_file[0].valid()) {
+            size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+              if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
                 return 0; 
               }
 
 
               size_t __l_count {};
-              auto __data = mapped_file[0].as_span(); 
+              auto __data = mapped_file[f_idx].as_span(); 
               const char* ptr = __data.data();
               const char* end = ptr + __data.size();
 
@@ -750,19 +757,17 @@ namespace wc_class {
         //  x86-64 CPU.
         [[gnu::target("sse2")]]
           __FORCE_INLINE 
-            size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
-              if (mapped_file.empty() || !mapped_file[0].valid()) {
+            size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+              if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
                 return 0; 
               }
 
               size_t __l_count {};
-              auto __data = mapped_file[0].as_span(); 
+              auto __data = mapped_file[f_idx].as_span(); 
               const char* ptr = __data.data();
               const char* end = ptr + __data.size();
 
               const __m128i newline = _mm_set1_epi8('\n'); 
-
-              std::cout << "Used SSE2" << std::endl; 
 
               while (LIKELY(ptr + 16 <= end)) {
                 __builtin_prefetch(ptr + 64, 0, 3);
@@ -781,14 +786,12 @@ namespace wc_class {
 
               return __l_count;
 #else // Fallback to a scalar implementation 
-              __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity{}) noexcept {
+              __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
                 size_t __l_count {};
-                auto __data = mapped_file[0].as_span(); 
+                auto __data = mapped_file[f_idx].as_span(); 
                 const char* ptr = __data.data();
                 const char* end = ptr + __data.size();
 
-              
-                std::cout << "Used SSE2" << std::endl; 
                 
                 // Process 32 bytes at a time (Ah the motherfucker)
                 while (LIKELY(ptr + 32 <= end)) {
@@ -825,24 +828,89 @@ namespace wc_class {
 #pragma endregion  __WC_LINE_IMPL 
 #endif // _MSVC
 
+
+
+#if defined(_MSVC) 
+#pragma region __WC_WORD_IMPL 
+#endif // _MSVC 
+            
+              // Dummy function, will break on very large file 
+              // theorically.
+              size_t __wc_word_0(Translation translation = std::identity{}, size_t f_idx = 0) {
+                size_t __w_count {}, pos = -1; 
+                
+                auto __data = mapped_file[f_idx].as_span(); 
+                auto __str = std::string_view(__data.data()); 
+
+                while (LIKELY(true)) [[likely]] {
+                  if ((pos = __str.find_first_not_of(" \r\n\t", pos + 1)) == __str.npos) break; 
+                  __w_count++;
+                  if ((pos = __str.find_first_of(" \r\n\t", pos + 1)) == __str.npos) break; 
+                }
+
+                return __w_count; 
+              }
+
+              [[nodiscard]] __FORCE_INLINE size_t getTotalWord() const noexcept 
+              {
+                return total_word; 
+              }
+
+              [[nodiscard]] __FORCE_INLINE size_t getTotalLine() const noexcept 
+              {
+                return total_line; 
+              }
+
+              [[nodiscard]] __FORCE_INLINE size_t getTotalChar() const noexcept 
+              {
+                return total_char; 
+              }
+
+              [[nodiscard]] __FORCE_INLINE size_t getTotalBytes() const noexcept 
+              {
+                return total_bytes; 
+              }
+              
+              // Last call 
+              __FORCE_INLINE void printTotal() const noexcept 
+              {
+                if (count_line) std::cout << total_line << '\t'; 
+                if (count_word) std::cout << total_word << '\t'; 
+                if (count_char) std::cout << total_char << '\t'; 
+                if (count_bytes) std::cout << total_bytes << '\t';
+                std::cout << "total" << std::endl; 
+              }
+
+#if defined(_MSVC) 
+#pragma endregion __WC_WORD_IMPL 
+#endif // _MSVC 
               // Global wrapper for every command line options
-              size_t wc(Translation translation = std::identity{})
+              void wc(Translation __local_transform = std::identity{})
               {
                 size_t var {}; 
-                size_t total = 0; 
 
-                __parse_argv();
-                if (count_line) {
-                  var = __wc_line_1();
-                  std::cout << "Line: \t" << var << '\t' << std::endl; 
+                __parse_argv(); 
+                for (int i=0; i < mapped_file.size(); ++i) {
+                  if (count_line) {
+                    var = __wc_line_1(__local_transform, i);
+                    std::cout << var << '\t'; 
+                    total_line += var; 
+                  }
+
+                  if (count_word) {
+                    var = __wc_word_0(__local_transform, i); 
+                    std::cout << var << '\t'; 
+                    total_word += var; 
+                  }
+                  
+                  if (count_bytes) {
+                    var = __wc_char_1(__local_transform, i); 
+                    std::cout << var << '\t'; 
+                    total_bytes += var; 
+                  }
+
+                  std::cout << mapped_file[i].filename() << std::endl;  
                 }
-
-                if (count_bytes) {
-                  var = __wc_char_1(); 
-                  std::cout << "Bytes: \t" << var << '\t' << std::endl; 
-                }
-
-                return total; 
               }
 
               private:
@@ -863,6 +931,11 @@ namespace wc_class {
               bool count_bytes; 
               bool count_char; 
               bool count_word; 
+
+              size_t total_line{}; 
+              size_t total_bytes{}; 
+              size_t total_char{}; 
+              size_t total_word{};
 
               std::vector<fs::__wc_mapped_file> mapped_file; 
 
@@ -968,9 +1041,8 @@ namespace wc_class {
 
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();  
-    auto res = __wcObject0->wc();
-
-    std::cout << "Total:" << res << std::endl; 
+    __wcObject0->wc();
+    __wcObject0->printTotal(); 
     auto end = std::chrono::high_resolution_clock::now(); 
 
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start); 

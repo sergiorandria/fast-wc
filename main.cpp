@@ -14,7 +14,7 @@
  *
  *   You should have received a copy of the GNU General Public License
  *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
+ */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -39,7 +39,8 @@
 #include <filesystem>
 #include <ranges>
 #include <span> 
-#include <array> 
+#include <array>
+#include <cmath> 
 
 #include <sys/mman.h> 
 #include <fcntl.h> 
@@ -47,7 +48,7 @@
 
 #define __wc_lib_use_std_atomic
 
-#if __cplusplus >= 20203L
+#if __cplusplus >= 202002L
 #define __cpp_lib_use_likely
 // Can use C++20 [[likely]] for branch 
 // prediction. 
@@ -99,6 +100,13 @@ namespace detail
     }
 
     return __neg ? -res : res;
+  }
+  
+  // Calculate the width of an integer 
+  // Another function for size_t
+  size_t __int_width(size_t &__n) {
+    if (!__n) return 1; 
+    return std::floor(std::log10(__n)) + 1;
   }
 
   // Option type 
@@ -330,41 +338,49 @@ namespace fs {
 
     std::string filename_; 
 
+    // After redesigning, 
+    // Should include the result in the file structure 
+    // (For better formatting) 
+    size_t __w_cnt {}; 
+    size_t __l_cnt {}; 
+    size_t __b_cnt {}; 
+    size_t __c_cnt {}; 
+
     explicit __wc_mapped_file(std::string_view __fn)
       :  filename_(__fn) { 
-      struct stat __sb; 
+        struct stat __sb; 
 
-      if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
-        return; 
-      } 
+        if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
+          return; 
+        } 
 
-      if (UNLIKELY(fstat(__fd, &__sb) == -1)) [[unlikely]] {
-        close(__fd); 
-        __fd = -1; 
-        return; 
-      }
+        if (UNLIKELY(fstat(__fd, &__sb) == -1)) [[unlikely]] {
+          close(__fd); 
+          __fd = -1; 
+          return; 
+        }
 
-      if (UNLIKELY((size_ = __sb.st_size) == 0)) [[unlikely]] {
-        close(__fd); 
-        __fd = -1; 
-        return; 
-      }
+        if (UNLIKELY((size_ = __sb.st_size) == 0)) [[unlikely]] {
+          close(__fd); 
+          __fd = -1; 
+          return; 
+        }
 
-      if (UNLIKELY((data_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE | MAP_POPULATE, __fd, 0)) == MAP_FAILED)) [[unlikely]] {
-        data_ = nullptr; 
-        close(__fd); 
-        __fd = -1; 
-        return; 
-      }
+        if (UNLIKELY((data_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE | MAP_POPULATE, __fd, 0)) == MAP_FAILED)) [[unlikely]] {
+          data_ = nullptr; 
+          close(__fd); 
+          __fd = -1; 
+          return; 
+        }
 
-      madvise(data_, size_, MADV_SEQUENTIAL | MADV_WILLNEED); 
+        madvise(data_, size_, MADV_SEQUENTIAL | MADV_WILLNEED); 
 
 #ifdef MADV_HUGEPAGE 
-      // Give directions to the kernel about the address 
-      // range beginning at data (void*)
-      madvise(data_, size_, MADV_HUGEPAGE);
+        // Give directions to the kernel about the address 
+        // range beginning at data (void*)
+        madvise(data_, size_, MADV_HUGEPAGE);
 #endif // MADV_HUGEPAGE 
-    }
+      }
 
 
     // No copy constructor (Object should be unique) 
@@ -390,6 +406,48 @@ namespace fs {
     [[nodiscard]] __FORCE_INLINE std::string filename() const noexcept 
     {
       return filename_; 
+    }
+
+    // Setter
+    __FORCE_INLINE void setWordCnt(const size_t w_cnt) noexcept
+    {
+      __w_cnt = w_cnt; 
+    }
+
+    __FORCE_INLINE void setLineCnt(const size_t l_cnt) noexcept
+    {
+      __l_cnt = l_cnt; 
+    }
+
+    __FORCE_INLINE void setCharCnt(const size_t c_cnt) noexcept
+    {
+      __c_cnt = c_cnt; 
+    }
+
+    __FORCE_INLINE void setBytesCnt(const size_t b_cnt) noexcept
+    {
+      __b_cnt = b_cnt; 
+    }
+
+    //Getter 
+    [[nodiscard]] size_t getWordCnt() const noexcept
+    {
+      return __w_cnt; 
+    }
+
+    [[nodiscard]] size_t getLineCnt() const noexcept
+    {
+      return __l_cnt; 
+    }
+
+    [[nodiscard]] size_t getCharCnt() const noexcept
+    {
+      return __c_cnt; 
+    }
+
+    [[nodiscard]] size_t getBytesCnt() const noexcept
+    {
+      return __b_cnt; 
     }
   };
 }
@@ -687,7 +745,7 @@ namespace wc_class {
               auto __data = mapped_file[f_idx].as_span(); 
               const char *ptr = __data.data(); 
               const char *end = ptr + __data.size(); 
-              
+
               const __m512i newline = _mm512_set1_epi8('\n');
 
               // Process 64 bytes at a time
@@ -792,7 +850,7 @@ namespace wc_class {
                 const char* ptr = __data.data();
                 const char* end = ptr + __data.size();
 
-                
+
                 // Process 32 bytes at a time (Ah the motherfucker)
                 while (LIKELY(ptr + 32 <= end)) {
                   __l_count += (ptr[0] == '\n') + (ptr[1] == '\n') + 
@@ -833,12 +891,12 @@ namespace wc_class {
 #if defined(_MSVC) 
 #pragma region __WC_WORD_IMPL 
 #endif // _MSVC 
-            
+
               // Dummy function, will break on very large file 
               // theorically.
               size_t __wc_word_0(Translation translation = std::identity{}, size_t f_idx = 0) {
-                size_t __w_count {}, pos = -1; 
-                
+                size_t __w_count {}, pos = 0; 
+
                 auto __data = mapped_file[f_idx].as_span(); 
                 auto __str = std::string_view(__data.data()); 
 
@@ -870,21 +928,30 @@ namespace wc_class {
               {
                 return total_bytes; 
               }
-              
+
               // Last call 
               __FORCE_INLINE void printTotal() const noexcept 
               {
-                if (count_line) std::cout << total_line << '\t'; 
-                if (count_word) std::cout << total_word << '\t'; 
-                if (count_char) std::cout << total_char << '\t'; 
-                if (count_bytes) std::cout << total_bytes << '\t';
+                for (const auto &file: mapped_file) {
+                  if (count_line) std::cout << std::setw(__max_line_width) << file.getLineCnt() << ' '; 
+                  if (count_word) std::cout << std::setw(__max_word_width) << file.getWordCnt() << ' '; 
+                  if (count_char) std::cout << std::setw(__max_char_width) << file.getCharCnt() << ' '; 
+                  if (count_bytes) std::cout << std::setw(__max_bytes_width) << file.getBytesCnt() << ' ';
+
+                  std::cout << file.filename() << std::endl; 
+                }
+
+                if (count_line) std::cout << std::setw(__max_line_width) << total_line << ' '; 
+                if (count_word) std::cout << std::setw(__max_word_width) << total_word << ' '; 
+                if (count_char) std::cout << std::setw(__max_char_width) << total_char << ' '; 
+                if (count_bytes) std::cout << std::setw(__max_bytes_width) << total_bytes << ' ';
                 std::cout << "total" << std::endl; 
               }
 
 #if defined(_MSVC) 
 #pragma endregion __WC_WORD_IMPL 
 #endif // _MSVC 
-              // Global wrapper for every command line options
+       // Global wrapper for every command line options
               void wc(Translation __local_transform = std::identity{})
               {
                 size_t var {}; 
@@ -893,23 +960,24 @@ namespace wc_class {
                 for (int i=0; i < mapped_file.size(); ++i) {
                   if (count_line) {
                     var = __wc_line_1(__local_transform, i);
-                    std::cout << var << '\t'; 
+                    mapped_file[i].setLineCnt(var);
+                    __max_line_width = std::max(__max_line_width, detail::__int_width(var)); 
                     total_line += var; 
                   }
 
                   if (count_word) {
                     var = __wc_word_0(__local_transform, i); 
-                    std::cout << var << '\t'; 
+                    mapped_file[i].setWordCnt(var);  
+                    __max_word_width = std::max(__max_word_width, detail::__int_width(var)); 
                     total_word += var; 
                   }
-                  
+
                   if (count_bytes) {
                     var = __wc_char_1(__local_transform, i); 
-                    std::cout << var << '\t'; 
+                    mapped_file[i].setBytesCnt(var);  
+                    __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(var)); 
                     total_bytes += var; 
                   }
-
-                  std::cout << mapped_file[i].filename() << std::endl;  
                 }
               }
 
@@ -936,6 +1004,11 @@ namespace wc_class {
               size_t total_bytes{}; 
               size_t total_char{}; 
               size_t total_word{};
+
+              size_t __max_line_width{}; 
+              size_t __max_word_width{}; 
+              size_t __max_char_width{}; 
+              size_t __max_bytes_width{}; 
 
               std::vector<fs::__wc_mapped_file> mapped_file; 
 
@@ -1027,7 +1100,7 @@ namespace wc_class {
     auto __wcObject1 =
       wc_class::__wc_internal_class<std::char_traits<wchar_t>, std::vector<char>>::Instance();
 
-#if __cplusplus >= 20203L 
+#if __cplusplus >= 202002L 
     auto __wcObject2 =
       wc_class::__wc_internal_class<std::char_traits<char8_t>, std::vector<char>>::Instance();
 #endif // __cplusplus

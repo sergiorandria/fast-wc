@@ -101,7 +101,7 @@ namespace detail
 
     return __neg ? -res : res;
   }
-  
+
   // Calculate the width of an integer 
   // Another function for size_t
   size_t __int_width(size_t &__n) {
@@ -331,6 +331,12 @@ namespace detail
 namespace fs {
   using namespace detail; 
 
+  // __wc_mapped_file mode.
+  // The constructor will depend on the 
+  // specified mode. 
+  enum class __wc_mapped_file_mode { BytesOnly, NeedMmap }; 
+
+
   struct __wc_mapped_file {
     void *data_ {}; 
     size_t size_ {}; 
@@ -346,40 +352,63 @@ namespace fs {
     size_t __b_cnt {}; 
     size_t __c_cnt {}; 
 
-    explicit __wc_mapped_file(std::string_view __fn)
+    __wc_mapped_file_mode mode_; 
+
+    explicit __wc_mapped_file(std::string_view __fn, __wc_mapped_file_mode __mode)
       :  filename_(__fn) { 
-        struct stat __sb; 
 
-        if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
-          return; 
-        } 
+        if (LIKELY(__mode == __wc_mapped_file_mode::NeedMmap)) [[likely]] { 
+          struct stat __sb; 
 
-        if (UNLIKELY(fstat(__fd, &__sb) == -1)) [[unlikely]] {
-          close(__fd); 
-          __fd = -1; 
-          return; 
-        }
+          if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
+            return; 
+          } 
 
-        if (UNLIKELY((size_ = __sb.st_size) == 0)) [[unlikely]] {
-          close(__fd); 
-          __fd = -1; 
-          return; 
-        }
+          if (UNLIKELY(fstat(__fd, &__sb) == -1)) [[unlikely]] {
+            close(__fd); 
+            __fd = -1; 
+            return; 
+          }
 
-        if (UNLIKELY((data_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE | MAP_POPULATE, __fd, 0)) == MAP_FAILED)) [[unlikely]] {
-          data_ = nullptr; 
-          close(__fd); 
-          __fd = -1; 
-          return; 
-        }
+          if (UNLIKELY((size_ = __sb.st_size) == 0)) [[unlikely]] {
+            close(__fd); 
+            __fd = -1; 
+            return; 
+          }
 
-        madvise(data_, size_, MADV_SEQUENTIAL | MADV_WILLNEED); 
 
+          if (UNLIKELY((data_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE | MAP_POPULATE, __fd, 0)) == MAP_FAILED)) [[unlikely]] {
+            data_ = nullptr; 
+            close(__fd); 
+            __fd = -1; 
+            return; 
+          }
+
+          madvise(data_, size_, MADV_SEQUENTIAL | MADV_WILLNEED); 
 #ifdef MADV_HUGEPAGE 
-        // Give directions to the kernel about the address 
-        // range beginning at data (void*)
-        madvise(data_, size_, MADV_HUGEPAGE);
+          // Give directions to the kernel about the address 
+          // range beginning at data (void*)
+          madvise(data_, size_, MADV_HUGEPAGE);
 #endif // MADV_HUGEPAGE 
+        }
+        
+        // Do some optimization tricks with -c option
+        // Use statx instead of fstat or stat.
+        else {
+          struct statx __sb; 
+          
+          if (UNLIKELY(statx(AT_FDCWD, filename_.c_str(), 0, STATX_SIZE, &__sb) == -1)) [[unlikely]] {
+            std::cerr << "Statx error" << std::endl; 
+            return;
+          }
+
+          if (UNLIKELY((size_ = __sb.stx_size) == 0)) [[unlikely]] {
+            std::cerr << "Size error" << std::endl; 
+            return;  
+          }
+          
+          mode_ = __mode; 
+        }
       }
 
 
@@ -395,7 +424,11 @@ namespace fs {
 
     [[nodiscard]] __FORCE_INLINE bool valid() const noexcept 
     {
-      return data_ != nullptr; 
+      if (mode_ == __wc_mapped_file_mode::NeedMmap) {  
+        return data_ != nullptr;
+      } else {
+        return true; 
+      }
     }
 
     [[nodiscard]] __FORCE_INLINE size_t size() const noexcept 
@@ -844,7 +877,7 @@ namespace wc_class {
 
               return __l_count;
 #else // Fallback to a scalar implementation 
-              __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+              __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept               {
                 size_t __l_count {};
                 auto __data = mapped_file[f_idx].as_span(); 
                 const char* ptr = __data.data();
@@ -885,7 +918,6 @@ namespace wc_class {
 #if defined(_MSVC) 
 #pragma endregion  __WC_LINE_IMPL 
 #endif // _MSVC
-
 
 
 #if defined(_MSVC) 
@@ -1039,13 +1071,22 @@ namespace wc_class {
                 count_char = parser.has('m'); 
                 count_word = parser.has('w');
 
+                fs::__wc_mapped_file_mode __m = fs::__wc_mapped_file_mode::NeedMmap; 
+                if (UNLIKELY(count_bytes && !count_word && !count_char && !count_line)) [[unlikely]] {
+#define __wc_lib_not_use_mmap 
+                  __m = fs::__wc_mapped_file_mode::BytesOnly; 
+                }
+
                 if (UNLIKELY(!count_word && !count_char && !count_line && !count_bytes)) [[unlikely]] {
-                  count_bytes = true; 
+                  count_bytes = true;
+#define __wc_lib_not_use_mmap 
+                  __m = fs::__wc_mapped_file_mode::BytesOnly; 
+
                 }
 
                 mapped_file.clear();
                 for (const std::string &s: argv) {
-                  if (s[0] != '-' && s != argv[0]) mapped_file.push_back(fs::__wc_mapped_file(s)); 
+                  if (s[0] != '-' && s != argv[0]) mapped_file.push_back(fs::__wc_mapped_file(s, __m)); 
                 }
               }
             };

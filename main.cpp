@@ -40,7 +40,10 @@
 #include <ranges>
 #include <span> 
 #include <array>
-#include <cmath> 
+#include <cmath>
+#include <future> 
+#include <condition_variable> 
+#include <queue> 
 
 #include <sys/mman.h> 
 #include <fcntl.h> 
@@ -59,6 +62,128 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 
 #define __FORCE_INLINE __attribute__((always_inline)) inline 
+
+#if not defined(__wc_lib_thread_pool) 
+#define __wc_lib_thread_pool 
+
+namespace tp {
+
+  inline constexpr int N_CORE = 4; 
+
+  // Should be a singleton 
+  template <size_t __n_core = N_CORE>
+    class __wc_thread_pool {
+      public:
+        __wc_thread_pool(const __wc_thread_pool<__n_core>&) = delete;
+        __wc_thread_pool& operator=(const __wc_thread_pool<__n_core>&) = delete;
+
+        static __wc_thread_pool<__n_core>* Instance() {
+          std::call_once(__init_flag, []() {
+              __instance.reset(new __wc_thread_pool<__n_core>());
+              });
+          return __instance.get();
+        }
+
+        // Submit a task and get a future for the result.
+        template<typename F, typename... Args>
+          auto submit(F&& f, Args&&... args) 
+          -> std::future<typename std::invoke_result<F, Args...>::type> 
+          {
+            using return_type = typename std::invoke_result<F, Args...>::type;
+
+            auto task = std::make_shared<std::packaged_task<return_type()>>(
+                std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+                );
+
+            std::future<return_type> res = task->get_future();
+            {
+              std::unique_lock<std::mutex> lock(__tp_mutex);
+
+              if (stop) {
+                throw std::runtime_error("Cannot submit to stopped thread pool");
+              }
+
+              tasks.emplace([task]() { (*task)(); });
+            }
+            __tp_cv.notify_one();
+            return res;
+          }
+
+        void enqueue(std::function<void()> task) {
+          {
+            std::unique_lock<std::mutex> lock(__tp_mutex);
+            if (stop) {
+              throw std::runtime_error("Cannot enqueue to stopped thread pool");
+            }
+            tasks.emplace(std::move(task));
+          }
+          __tp_cv.notify_one();
+        }
+
+        void shutdown() {
+          {
+            std::unique_lock<std::mutex> lock(__tp_mutex);
+            stop = true;
+          }
+          __tp_cv.notify_all();
+
+          for (auto& thread : threads) {
+            if (thread.joinable()) {
+              thread.join();
+            }
+          }
+        }
+
+        ~__wc_thread_pool() {
+          shutdown();
+        }
+
+        size_t thread_count() const { return __n_core; }
+
+      private:
+        __wc_thread_pool() {
+          __cpu_core = std::thread::hardware_concurrency();
+
+          for (size_t i = 0; i < __n_core; ++i) {
+            threads.emplace_back([this]() {
+                while (true) {
+                std::function<void()> task;
+                {
+                std::unique_lock<std::mutex> lock(__tp_mutex);
+                __tp_cv.wait(lock, [this]() { return stop || !tasks.empty(); });
+
+                if (stop && tasks.empty()) {
+                return;
+                }
+
+                task = std::move(tasks.front());
+                tasks.pop();
+                } task();
+                }
+                });
+          }
+        }
+
+        static std::unique_ptr<__wc_thread_pool<__n_core>> __instance;
+        static std::once_flag __init_flag;
+
+        unsigned int __cpu_core;
+        std::vector<std::thread> threads;
+        std::queue<std::function<void()>> tasks;
+        std::mutex __tp_mutex;
+        std::condition_variable __tp_cv;
+        std::atomic<bool> stop{false};
+    };
+
+  // Static member initialization
+  template <size_t __n_core>
+    std::unique_ptr<__wc_thread_pool<__n_core>> __wc_thread_pool<__n_core>::__instance;
+
+  template <size_t __n_core>
+    std::once_flag __wc_thread_pool<__n_core>::__init_flag;
+}
+
+#endif // __wc_lib_thread_pool 
 
 #if not defined(__wc_argv_parse) 
 #define __wc_argv_parse 
@@ -391,12 +516,12 @@ namespace fs {
           madvise(data_, size_, MADV_HUGEPAGE);
 #endif // MADV_HUGEPAGE 
         }
-        
+
         // Do some optimization tricks with -c option
         // Use statx instead of fstat or stat.
         else {
           struct statx __sb; 
-          
+
           if (UNLIKELY(statx(AT_FDCWD, filename_.c_str(), 0, STATX_SIZE, &__sb) == -1)) [[unlikely]] {
             std::cerr << "Statx error" << std::endl; 
             return;
@@ -406,7 +531,7 @@ namespace fs {
             std::cerr << "Size error" << std::endl; 
             return;  
           }
-          
+
           mode_ = __mode; 
         }
       }
@@ -1013,6 +1138,173 @@ namespace wc_class {
                 }
               }
 
+              void wc_parallel_0(Translation __local_transform = std::identity{}) {
+                size_t var{};
+
+                __parse_argv();
+
+                auto* pool = tp::__wc_thread_pool<>::Instance();
+                std::vector<std::future<void>> futures;
+
+                for (size_t i = 0; i < mapped_file.size(); ++i) {
+                  auto future = pool->submit([this, i, __local_transform]() {
+                      size_t var{};
+
+                      if (count_line) {
+                        var = __wc_line_1(__local_transform, i);
+                        mapped_file[i].setLineCnt(var);
+                      }
+
+                      if (count_word) {
+                        var = __wc_word_0(__local_transform, i);
+                        mapped_file[i].setWordCnt(var);
+                      }
+
+                      if (count_bytes) {
+                        var = __wc_char_1(__local_transform, i);
+                        mapped_file[i].setBytesCnt(var);
+                      }});
+
+                  futures.push_back(std::move(future));
+                }
+
+                for (auto& future : futures) {
+                  future.get();
+                }
+
+                for (const auto& file : mapped_file) {
+                  if (count_line) {
+                    auto line_cnt = file.getLineCnt();
+                    __max_line_width = std::max(__max_line_width, detail::__int_width(line_cnt));
+                    total_line += line_cnt;
+                  }
+                  if (count_word) {
+                    auto word_cnt = file.getWordCnt();
+                    __max_word_width = std::max(__max_word_width, detail::__int_width(word_cnt));
+                    total_word += word_cnt;
+                  }
+                  if (count_bytes) {
+                    auto bytes_cnt = file.getBytesCnt();
+                    __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(bytes_cnt));
+                    total_bytes += bytes_cnt;
+                  }
+                }
+              }
+
+
+              void wc_parallel_operations(Translation __local_transform = std::identity{}) {
+                __parse_argv();
+
+                auto* pool = tp::__wc_thread_pool<>::Instance();
+                std::vector<std::future<void>> futures;
+
+                if (count_line) {
+                  for (size_t i = 0; i < mapped_file.size(); ++i) {
+                    futures.push_back(pool->submit([this, i, __local_transform]() {
+                          auto var = __wc_line_1(__local_transform, i);
+                          mapped_file[i].setLineCnt(var);}));
+                  }
+                }
+
+                if (count_word) {
+                  for (size_t i = 0; i < mapped_file.size(); ++i) {
+                    futures.push_back(pool->submit([this, i, __local_transform]() {
+                          auto var = __wc_word_0(__local_transform, i);
+                          mapped_file[i].setWordCnt(var);
+                          }));
+                  }
+                }
+
+                if (count_bytes) {
+                  for (size_t i = 0; i < mapped_file.size(); ++i) {
+                    futures.push_back(pool->submit([this, i, __local_transform]() {
+                          auto var = __wc_char_1(__local_transform, i);
+                          mapped_file[i].setBytesCnt(var);
+                          }));
+                  }
+                }
+
+                for (auto& future : futures) {
+                  future.get();
+                }
+
+                // Calculate totals (sequential)
+                for (const auto& file : mapped_file) {
+                  if (count_line) {
+                    auto line_cnt = file.getLineCnt();
+                    __max_line_width = std::max(__max_line_width, detail::__int_width(line_cnt));
+                    total_line += line_cnt;
+                  }
+                  if (count_word) {
+                    auto word_cnt = file.getWordCnt();
+                    __max_word_width = std::max(__max_word_width, detail::__int_width(word_cnt));
+                    total_word += word_cnt;
+                  }
+                  if (count_bytes) {
+                    auto bytes_cnt = file.getBytesCnt();
+                    __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(bytes_cnt));
+                    total_bytes += bytes_cnt;
+                  }
+                }
+              }
+
+
+              void wc_parallel_hybrid(Translation __local_transform = std::identity{}) {
+                __parse_argv();
+
+                auto* pool = tp::__wc_thread_pool<>::Instance();
+
+                // Atomic counters for thread-safe aggregation
+                std::atomic<size_t> atomic_total_line{0};
+                std::atomic<size_t> atomic_total_word{0};
+                std::atomic<size_t> atomic_total_bytes{0};
+
+                std::mutex __width_mutex; 
+
+                std::vector<std::future<void>> futures;
+
+                for (size_t i = 0; i < mapped_file.size(); ++i) {
+                  futures.push_back(pool->submit([&, i, __local_transform]() {
+                        size_t var{};
+
+                        if (count_line) {
+                        var = __wc_line_1(__local_transform, i);
+                        mapped_file[i].setLineCnt(var);
+                        atomic_total_line.fetch_add(var, std::memory_order_relaxed);
+
+                        std::lock_guard<std::mutex> lock(__width_mutex);
+                        __max_line_width = std::max(__max_line_width, detail::__int_width(var));
+                        }
+
+                        if (count_word) {
+                        var = __wc_word_0(__local_transform, i);
+                        mapped_file[i].setWordCnt(var);
+                        atomic_total_word.fetch_add(var, std::memory_order_relaxed);
+
+                        std::lock_guard<std::mutex> lock(__width_mutex);
+                        __max_word_width = std::max(__max_word_width, detail::__int_width(var));
+                        }
+
+                        if (count_bytes) {
+                          var = __wc_char_1(__local_transform, i);
+                          mapped_file[i].setBytesCnt(var);
+                          atomic_total_bytes.fetch_add(var, std::memory_order_relaxed);
+
+                          std::lock_guard<std::mutex> lock(__width_mutex);
+                          __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(var));
+                        }
+                  }));
+                }
+
+                for (auto& future : futures) {
+                  future.get();
+                }
+
+                total_line = atomic_total_line.load();
+                total_word = atomic_total_word.load();
+                total_bytes = atomic_total_bytes.load();
+              }
+
               private:
 #if not defined(__wc_lib_use_std_atomic)
 #define __wc_lib_private_instance
@@ -1078,10 +1370,7 @@ namespace wc_class {
                 }
 
                 if (UNLIKELY(!count_word && !count_char && !count_line && !count_bytes)) [[unlikely]] {
-                  count_bytes = true;
-#define __wc_lib_not_use_mmap 
-                  __m = fs::__wc_mapped_file_mode::BytesOnly; 
-
+                  count_bytes = count_line = count_word = true;
                 }
 
                 mapped_file.clear();
@@ -1155,7 +1444,7 @@ namespace wc_class {
 
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();  
-    __wcObject0->wc();
+    __wcObject0->wc_parallel_hybrid();
     __wcObject0->printTotal(); 
     auto end = std::chrono::high_resolution_clock::now(); 
 

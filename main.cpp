@@ -45,10 +45,16 @@
 #include <condition_variable> 
 #include <queue> 
 
-#include <sys/mman.h> 
-#include <fcntl.h> 
-#include <sys/stat.h>
 
+#if defined(_POSIX_VERSION) && _POSIX_VERSION >= 200809L
+
+# include <sys/mman.h> 
+# include <fcntl.h> 
+# include <sys/stat.h>
+
+#endif // _POSIX_VERSION 
+  
+// For __wc_internal_class implementation 
 #define __wc_lib_use_std_atomic
 
 #if __cplusplus >= 202002L
@@ -65,6 +71,58 @@
 
 #if not defined(__wc_lib_thread_pool) 
 #define __wc_lib_thread_pool 
+
+#ifdef _WIN32 
+
+#include <tchar.h> 
+#include <cstdio> 
+#include <strsafe.h> 
+
+// For logging 
+void display_error(LPCTSTR lpszFunction) 
+  // Routine Description:
+  // Retrieve and output the system error message for the last-error code
+{ 
+  LPVOID lpMsgBuf;
+  LPVOID lpDisplayBuf;
+  DWORD dw = GetLastError(); 
+
+  FormatMessage(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+      FORMAT_MESSAGE_FROM_SYSTEM |
+      FORMAT_MESSAGE_IGNORE_INSERTS,
+      NULL,
+      dw,
+      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPTSTR) &lpMsgBuf,
+      0, 
+      NULL );
+
+  lpDisplayBuf = 
+    (LPVOID)LocalAlloc( LMEM_ZEROINIT, 
+        ( lstrlen((LPCTSTR)lpMsgBuf)
+          + lstrlen((LPCTSTR)lpszFunction)
+          + 40) // account for format string
+        * sizeof(TCHAR) );
+
+  if (FAILED( StringCchPrintf((LPTSTR)lpDisplayBuf, 
+          LocalSize(lpDisplayBuf) / sizeof(TCHAR),
+          TEXT("%s failed with error code %d as follows:\n%s"), 
+          lpszFunction, 
+          dw, 
+          lpMsgBuf)))
+  {
+    printf("FATAL ERROR: Unable to output error code.\n");
+  }
+
+  _tprintf(TEXT("ERROR: %s\n"), (LPCTSTR)lpDisplayBuf);
+
+  LocalFree(lpMsgBuf);
+  LocalFree(lpDisplayBuf);
+}
+
+#endif // _WIN32 
+
 
 namespace tp {
 
@@ -104,8 +162,7 @@ namespace tp {
               }
 
               tasks.emplace([task]() { (*task)(); });
-            }
-            __tp_cv.notify_one();
+            } __tp_cv.notify_one();
             return res;
           }
 
@@ -124,8 +181,7 @@ namespace tp {
           {
             std::unique_lock<std::mutex> lock(__tp_mutex);
             stop = true;
-          }
-          __tp_cv.notify_all();
+          } __tp_cv.notify_all();
 
           for (auto& thread : threads) {
             if (thread.joinable()) {
@@ -195,7 +251,7 @@ namespace detail
 
   // FNV-1a hash 
   // (Fowller-Noll-Vo hash function) 
-  constexpr __u32 hash_fnv1a(std::string_view __s) noexcept {
+  constexpr uint32_t hash_fnv1a(std::string_view __s) noexcept {
     uint32_t hash = 2166136261u; // FNV offset basis  
 
     for(const char &c: __s) {
@@ -465,7 +521,13 @@ namespace fs {
   struct __wc_mapped_file {
     void *data_ {}; 
     size_t size_ {}; 
+    
+#ifdef _WIN32 
+    HANDLE hFile_ = INVALID_HANDLE_VALUE; 
+    HANDLE hMapFile_ = INVALID_HANDLE_VALUE; 
+#else 
     int __fd = -1; 
+#endif 
 
     std::string filename_; 
 
@@ -483,8 +545,24 @@ namespace fs {
       :  filename_(__fn) { 
 
         if (LIKELY(__mode == __wc_mapped_file_mode::NeedMmap)) [[likely]] { 
-          struct stat __sb; 
+#ifdef _WIN32 
+          HANDLE h = CreateFileA(filename_.c_str(), 
+              GENERIC_READ, 
+              0, 
+              nullptr, 
+              OPEN_EXISTING, 
+              FILE_ATTRIBUTE_NORMAL, 
+              nullptr); 
+          if (h == INVALID_HANDLE_VALUE) 
+          {
+            display_error(TEXT("CreateFileA")); 
+            return; 
+          }
 
+#else
+          // stat and fstat are linux specific system calls
+          struct stat __sb; 
+          
           if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1)) [[unlikely]] {
             return; 
           } 
@@ -515,11 +593,23 @@ namespace fs {
           // range beginning at data (void*)
           madvise(data_, size_, MADV_HUGEPAGE);
 #endif // MADV_HUGEPAGE 
+#endif // _WIN32
         }
 
         // Do some optimization tricks with -c option
         // Use statx instead of fstat or stat.
         else {
+#ifdef _WIN32 
+          LARGE_INTEGER fileSize; 
+
+          if (!GetFileSizeEx(hFile_, &fileSize)) {
+            display_error(TEXT("GetFileSizeEx")); 
+            throw std::runtime_error("Failed to get the file size"); 
+          } 
+
+          size_ = fileSize.QuadPart; 
+
+#else  
           struct statx __sb; 
 
           if (UNLIKELY(statx(AT_FDCWD, filename_.c_str(), 0, STATX_SIZE, &__sb) == -1)) [[unlikely]] {
@@ -531,7 +621,8 @@ namespace fs {
             std::cerr << "Size error" << std::endl; 
             return;  
           }
-
+#endif // _WIN32
+       
           mode_ = __mode; 
         }
       }
@@ -540,7 +631,25 @@ namespace fs {
     // No copy constructor (Object should be unique) 
     //__wc_mapped_file(const __wc_mapped_file&) = delete;
 
-    virtual ~__wc_mapped_file() {}
+    virtual ~__wc_mapped_file() {
+      if (valid()) {
+#ifdef _WIN32 
+        UnmapViewOfFile(data_); 
+
+        if (hMapFile_ != INVALID_HANDLE_VALUE) 
+        {
+          CloseHandle(hMapFile_); 
+        } 
+
+        if (hFile_ != INVALID_HANDLE_VALUE) 
+        {
+          CloseHandle(hFile_); 
+        } 
+#else 
+        munmap(data_, size_); 
+#endif // _WIN32
+      } 
+    }
 
     [[nodiscard]] __FORCE_INLINE std::span<const char> as_span() const noexcept 
     {
@@ -711,10 +820,10 @@ namespace wc_class {
 
         // Initializing private members argc and argv. 
         // Normally, argv is a filename.
-        void init(int __argc, const char *__argv[]) 
+        void init(int ___argc, const char **___argv) 
         {
-          this->argc = __argc; 
-          auto views = std::ranges::subrange(__argv, __argv + __argc)
+          this->argc = ___argc; 
+          auto views = std::ranges::subrange(___argv, ___argv + ___argc)
             | std::views::transform([](const char *s) { return std::string(s); })
 #if __cplusplus >= 202302L
             // std::ranges::to was added in C++23, version below C++23 will make you compilator 
@@ -739,7 +848,7 @@ namespace wc_class {
 #pragma region __WC_CHAR_IMPL
 #endif // _MSVC
        // Maybe great if we use std::variant<> 
-          size_t __wc_char_0(Translation translation = std::identity{}) 
+          size_t __wc_char_0(Translation translation = std::identity{}, size_t f_idx = 0) 
           {
 #ifdef __linux__
             // Just some fstat tricks for optimizations
@@ -759,7 +868,7 @@ namespace wc_class {
             // Windows API (and programming) is slightly different, 
             // we have to use GetFileSizeEx()
 
-            HANDLE hFile = CreateFileA(this->argv[1], 
+            HANDLE hFile = CreateFileA(mapped_file[f_idx].filename().c_str(), 
                 GENERIC_READ, 
                 FILE_SHARE_READ, 
                 NULL, 
@@ -771,10 +880,10 @@ namespace wc_class {
             {
               LARGE_INTEGER __sz; 
 
-              if (GetFileSizeEx(hFile, &size))
+              if (GetFileSizeEx(hFile, &__sz))
               {
                 CloseHandle(hFile); 
-                return static_cast<size_t>(size.QuadPart); 
+                return static_cast<size_t>(__sz.QuadPart); 
               }
 
               CloseHandle(hFile); 
@@ -1001,6 +1110,8 @@ namespace wc_class {
               }
 
               return __l_count;
+            }
+
 #else // Fallback to a scalar implementation 
               __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept               {
                 size_t __l_count {};
@@ -1151,18 +1262,18 @@ namespace wc_class {
                       size_t var{};
 
                       if (count_line) {
-                        var = __wc_line_1(__local_transform, i);
-                        mapped_file[i].setLineCnt(var);
+                      var = __wc_line_1(__local_transform, i);
+                      mapped_file[i].setLineCnt(var);
                       }
 
                       if (count_word) {
-                        var = __wc_word_0(__local_transform, i);
-                        mapped_file[i].setWordCnt(var);
+                      var = __wc_word_0(__local_transform, i);
+                      mapped_file[i].setWordCnt(var);
                       }
 
                       if (count_bytes) {
-                        var = __wc_char_1(__local_transform, i);
-                        mapped_file[i].setBytesCnt(var);
+                      var = __wc_char_1(__local_transform, i);
+                      mapped_file[i].setBytesCnt(var);
                       }});
 
                   futures.push_back(std::move(future));
@@ -1350,12 +1461,12 @@ namespace wc_class {
                 auto parser = pb.build(); 
 
                 // Need to convert back to const char ** 
-                std::vector<const char*> __argv; 
+                std::vector<const char*> ___argv; 
                 for(const auto& arg : argv) {
-                  __argv.push_back(arg.c_str()); 
+                  ___argv.push_back(arg.c_str()); 
                 }
 
-                parser.parse(this->argc, __argv.data()); 
+                parser.parse(this->argc, ___argv.data()); 
 
                 // Set flags from the parser object 
                 count_line = parser.has('l'); 
@@ -1391,17 +1502,24 @@ namespace wc_class {
           std::optional<__wc_internal_class<BitChar, Translation>>
           __wc_internal_class<BitChar, Translation>::instance;
 #endif // __wc_lib_use_std_atomic
-
+#ifndef _WIN32 
         template <class BitChar, class Translation>
           std::shared_mutex __wc_internal_class<BitChar, Translation>::lock;
 
         template <class BitChar, class Translation>
           std::once_flag __wc_internal_class<BitChar, Translation>::wc_flag;
+#endif // _WIN32
     } // namespace wc_class
 
+#ifdef _WIN32 
+        template <class BitChar, class Translation>
+          std::shared_mutex wc_class::__wc_internal_class<BitChar, Translation>::lock;
+
+        template <class BitChar, class Translation>
+          std::once_flag wc_class::__wc_internal_class<BitChar, Translation>::wc_flag;
+#endif // _WIN32 
+
 #endif // __wc_internal_class
-
-
 
   template <class BitChar, class Translation>
     inline constexpr wc_class::__wc_internal_class<BitChar, Translation>
@@ -1419,7 +1537,7 @@ namespace wc_class {
   // remaining lines <= time counting full line ? 
   //
   // Under which assumptions this last statement is true ? 
-  int main(int argc, const char *argv[]) {
+  int main(int argc, const char **argv) {
     std::cout.sync_with_stdio(false); 
     std::ios_base::sync_with_stdio(false); 
     std::cin.tie(nullptr); 

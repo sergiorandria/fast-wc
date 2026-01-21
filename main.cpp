@@ -73,10 +73,27 @@
 #define __wc_lib_thread_pool 
 
 #ifdef _WIN32 
-
 #include <tchar.h> 
 #include <cstdio> 
 #include <strsafe.h> 
+
+DWORD g_BytesTransferred = 0;
+
+VOID CALLBACK FileIOCompletionRoutine(
+  __in  DWORD dwErrorCode,
+  __in  DWORD dwNumberOfBytesTransfered,
+  __in  LPOVERLAPPED lpOverlapped
+);
+
+VOID CALLBACK FileIOCompletionRoutine(
+  __in  DWORD dwErrorCode,
+  __in  DWORD dwNumberOfBytesTransfered,
+  __in  LPOVERLAPPED lpOverlapped )
+ {
+  _tprintf(TEXT("Error code:\t%x\n"), dwErrorCode);
+  _tprintf(TEXT("Number of bytes:\t%x\n"), dwNumberOfBytesTransfered);
+  g_BytesTransferred = dwNumberOfBytesTransfered;
+ }
 
 // For logging 
 void display_error(LPCTSTR lpszFunction) 

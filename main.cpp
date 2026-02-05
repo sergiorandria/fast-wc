@@ -45,6 +45,7 @@
 #include <condition_variable>
 #include <queue>
 #include <cstring>
+#include <cstdlib>
 
 
 #if defined(_POSIX_VERSION) && _POSIX_VERSION >= 200809L
@@ -1054,7 +1055,7 @@ struct __wc_mapped_file
     }
 
     explicit __wc_mapped_file ( std::string_view __fn, __wc_mapped_file_mode __mode )
-        :  filename_ ( __fn )
+        :  filename_ ( __fn ), is_stdin_ ( false )
     {
 
         if ( LIKELY ( __mode == __wc_mapped_file_mode::NeedMmap ) ) [[likely]]
@@ -2581,8 +2582,51 @@ class __wc_internal_class
         // argv is already a member of the class
         inline void __parse_argv()
         {
+            // Check for --version and --help first
+            for (const auto& arg : argv)
+            {
+                if (arg == "--version")
+                {
+                    std::cout << "fast-wc (GNU coreutils) 1.0.0\n"
+                              << "Copyright (C) 2026 Free Software Foundation, Inc.\n"
+                              << "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n"
+                              << "This is free software: you are free to change and redistribute it.\n"
+                              << "There is NO WARRANTY, to the extent permitted by law.\n"
+                              << "Written by Sergio Randriamihoatra.\n";
+                    std::exit(0);
+                }
+                
+                if (arg == "--help")
+                {
+                    std::cout << "Usage: " << argv[0] << " [OPTION]... [FILE]...\n"
+                              << "  or:  " << argv[0] << " [OPTION]... --files0-from=F\n"
+                              << "Print newline, word, and byte counts for each FILE, and a total line if\n"
+                              << "more than one FILE is specified.  A word is a nonempty sequence of non white\n"
+                              << "space delimited by white space characters or by start or end of input.\n"
+                              << "With no FILE, or when FILE is -, read standard input.\n"
+                              << "\n"
+                              << "The options below may be used to select which counts are printed, always in\n"
+                              << "the following order: newline, word, character, byte, maximum line length.\n"
+                              << "  -c, --bytes            print the byte counts\n"
+                              << "  -m, --chars            print the character counts\n"
+                              << "  -l, --lines            print the newline counts\n"
+                              << "      --files0-from=F    read input from the files specified by\n"
+                              << "                           NUL-terminated names in file F;\n"
+                              << "                           If F is - then read names from standard input\n"
+                              << "  -L, --max-line-length  print the maximum display width\n"
+                              << "  -w, --words            print the word counts\n"
+                              << "      --total=WHEN       when to print a line with total counts;\n"
+                              << "                           WHEN can be: auto, always, only, never\n"
+                              << "      --help        display this help and exit\n"
+                              << "      --version     output version information and exit\n"
+                              << "\n"
+                              << "Report bugs to: sergiorandriamihoatra@gmail.com\n";
+                    std::exit(0);
+                }
+            }
+            
             auto pb = __wc_argparser_builder<>()
-                      .flag<bool> ( 'l', "line"sv )
+                      .flag<bool> ( 'l', "lines"sv )
                       .flag<bool> ( 'c', "bytes"sv )
                       .flag<bool> ( 'm', "chars"sv )
                       .flag<bool> ( 'w', "words"sv );
@@ -2622,10 +2666,20 @@ class __wc_internal_class
             bool has_files = false;
             for ( const std::string &s : argv )
             {
-                if ( s[0] != '-' && s != argv[0] )
+                if ( s != argv[0] )
                 {
-                    mapped_file.push_back ( fs::__wc_mapped_file ( s, __m ) );
-                    has_files = true;
+                    // Handle "-" as stdin
+                    if ( s == "-" )
+                    {
+                        mapped_file.push_back ( fs::__wc_mapped_file() );
+                        has_files = true;
+                    }
+                    // Skip flags (starting with -)
+                    else if ( s[0] != '-' )
+                    {
+                        mapped_file.push_back ( fs::__wc_mapped_file ( s, __m ) );
+                        has_files = true;
+                    }
                 }
             }
             

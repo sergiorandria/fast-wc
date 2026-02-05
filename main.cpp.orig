@@ -1043,7 +1043,6 @@ struct __wc_mapped_file
             }
 
             LARGE_INTEGER fileSize;
-
             if ( !GetFileSizeEx ( hFile_, &fileSize ) )
             {
                 display_error ( TEXT ( "GetFileSizeEx" ) );
@@ -1202,7 +1201,7 @@ struct __wc_mapped_file
 #elif defined(_WIN32)
         , hFile_ ( other.hFile_ )
         , hMapFile_ ( other.hMapFile_ )
-#endif
+#endif 
         , filename_ ( std::move ( other.filename_ ) )
         , __w_cnt ( other.__w_cnt )
         , __l_cnt ( other.__l_cnt )
@@ -1212,12 +1211,12 @@ struct __wc_mapped_file
     {
         other.data_ = nullptr;
         other.size_ = 0;
-#if defined(__linux__)
+#if defined(__linux__) 
         other.__fd = -1;
-#elif defined(_WIN32)
+#elif defined(_WIN32) 
         other.hFile_ = INVALID_HANDLE_VALUE;
-        other.hMapFile_ = INVALID_HANDLE_VALUE;
-#endif
+        other.hMapFile_ = INVALID_HANDLE_VALUE; 
+#endif 
     }
 
     // Move assignment
@@ -1230,41 +1229,35 @@ struct __wc_mapped_file
             {
 #ifdef __linux__
                 munmap ( data_, size_ );
-
                 if ( __fd != -1 )
                 {
                     close ( __fd );
                 }
-
 #elif defined(_WIN32)
-
                 if ( data_ != nullptr )
                 {
                     UnmapViewOfFile ( data_ );
                 }
-
                 if ( hMapFile_ != INVALID_HANDLE_VALUE )
                 {
                     CloseHandle ( hMapFile_ );
                 }
-
                 if ( hFile_ != INVALID_HANDLE_VALUE )
                 {
                     CloseHandle ( hFile_ );
                 }
-
 #endif
             }
 
             // Move from other
             data_ = other.data_;
             size_ = other.size_;
-#ifdef __linux__
+#ifdef __linux__ 
             __fd = other.__fd;
 #elif defined(_WIN32)
             hFile_ = other.hFile_;
             hMapFile_ = other.hMapFile_;
-#endif
+#endif 
             filename_ = std::move ( other.filename_ );
             __w_cnt = other.__w_cnt;
             __l_cnt = other.__l_cnt;
@@ -1275,12 +1268,12 @@ struct __wc_mapped_file
             // Nullify other
             other.data_ = nullptr;
             other.size_ = 0;
-#ifdef __linux__
+#ifdef __linux__ 
             other.__fd = -1;
-#elif defined(_WIN32)
+#elif defined(_WIN32) 
             other.hFile_ = INVALID_HANDLE_VALUE;
             other.hMapFile_ = INVALID_HANDLE_VALUE;
-#endif
+#endif 
         }
 
         return *this;
@@ -1291,7 +1284,6 @@ struct __wc_mapped_file
         if ( valid() )
         {
 #ifdef _WIN32
-
             if ( data_ != nullptr )
             {
                 UnmapViewOfFile ( data_ );
@@ -1308,17 +1300,14 @@ struct __wc_mapped_file
             }
 
 #else
-
             if ( data_ != nullptr )
             {
                 munmap ( data_, size_ );
             }
-
             if ( __fd != -1 )
             {
                 close ( __fd );
             }
-
 #endif // _WIN32
         }
     }

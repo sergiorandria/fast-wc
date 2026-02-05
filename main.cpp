@@ -1030,23 +1030,26 @@ struct __wc_mapped_file
         // Read all stdin into memory
         std::vector<char> buffer;
         constexpr size_t chunk_size = 65536; // 64KB chunks
-        
+
         char temp_buf[chunk_size];
+
         while (std::cin.read(temp_buf, chunk_size) || std::cin.gcount() > 0)
         {
             buffer.insert(buffer.end(), temp_buf, temp_buf + std::cin.gcount());
         }
-        
+
         size_ = buffer.size();
-        
+
         if (size_ > 0)
         {
             // Allocate memory and copy data
             data_ = malloc(size_);
+
             if (data_)
             {
                 std::memcpy(data_, buffer.data(), size_);
             }
+
             else
             {
                 size_ = 0;
@@ -1268,7 +1271,9 @@ struct __wc_mapped_file
                     // Free malloc'd memory for stdin
                     free ( data_ );
                 }
+
 #ifdef __linux__
+
                 else if ( !is_stdin_ && data_ != nullptr )
                 {
                     munmap ( data_, size_ );
@@ -1339,7 +1344,9 @@ struct __wc_mapped_file
                 // Free malloc'd memory for stdin
                 free ( data_ );
             }
+
 #ifdef _WIN32
+
             else
             {
                 if ( data_ != nullptr )
@@ -1357,7 +1364,9 @@ struct __wc_mapped_file
                     CloseHandle ( hFile_ );
                 }
             }
+
 #else
+
             else
             {
                 if ( data_ != nullptr )
@@ -1370,6 +1379,7 @@ struct __wc_mapped_file
                     close ( __fd );
                 }
             }
+
 #endif // _WIN32
         }
     }
@@ -2595,7 +2605,7 @@ class __wc_internal_class
                               << "Written by Sergio Randriamihoatra.\n";
                     std::exit(0);
                 }
-                
+
                 if (arg == "--help")
                 {
                     std::cout << "Usage: " << argv[0] << " [OPTION]... [FILE]...\n"
@@ -2624,7 +2634,7 @@ class __wc_internal_class
                     std::exit(0);
                 }
             }
-            
+
             auto pb = __wc_argparser_builder<>()
                       .flag<bool> ( 'l', "lines"sv )
                       .flag<bool> ( 'c', "bytes"sv )
@@ -2664,6 +2674,7 @@ class __wc_internal_class
             mapped_file.clear();
 
             bool has_files = false;
+
             for ( const std::string &s : argv )
             {
                 if ( s != argv[0] )
@@ -2674,6 +2685,7 @@ class __wc_internal_class
                         mapped_file.push_back ( fs::__wc_mapped_file() );
                         has_files = true;
                     }
+
                     // Skip flags (starting with -)
                     else if ( s[0] != '-' )
                     {
@@ -2682,7 +2694,7 @@ class __wc_internal_class
                     }
                 }
             }
-            
+
             // If no files provided, read from stdin
             if ( !has_files )
             {

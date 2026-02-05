@@ -44,6 +44,7 @@
 #include <future>
 #include <condition_variable>
 #include <queue>
+#include <cstring>
 
 
 #if defined(_POSIX_VERSION) && _POSIX_VERSION >= 200809L
@@ -1019,6 +1020,38 @@ struct __wc_mapped_file
     size_t __c_cnt {};
 
     __wc_mapped_file_mode mode_;
+    bool is_stdin_ = false;
+
+    // Constructor for stdin
+    explicit __wc_mapped_file()
+        : filename_("(standard input)"), is_stdin_(true), mode_(__wc_mapped_file_mode::NeedMmap)
+    {
+        // Read all stdin into memory
+        std::vector<char> buffer;
+        constexpr size_t chunk_size = 65536; // 64KB chunks
+        
+        char temp_buf[chunk_size];
+        while (std::cin.read(temp_buf, chunk_size) || std::cin.gcount() > 0)
+        {
+            buffer.insert(buffer.end(), temp_buf, temp_buf + std::cin.gcount());
+        }
+        
+        size_ = buffer.size();
+        
+        if (size_ > 0)
+        {
+            // Allocate memory and copy data
+            data_ = malloc(size_);
+            if (data_)
+            {
+                std::memcpy(data_, buffer.data(), size_);
+            }
+            else
+            {
+                size_ = 0;
+            }
+        }
+    }
 
     explicit __wc_mapped_file ( std::string_view __fn, __wc_mapped_file_mode __mode )
         :  filename_ ( __fn )
@@ -1209,6 +1242,7 @@ struct __wc_mapped_file
         , __b_cnt ( other.__b_cnt )
         , __c_cnt ( other.__c_cnt )
         , mode_ ( other.mode_ )
+        , is_stdin_ ( other.is_stdin_ )
     {
         other.data_ = nullptr;
         other.size_ = 0;
@@ -1228,8 +1262,16 @@ struct __wc_mapped_file
             // Clean up existing resources
             if ( valid() )
             {
+                if ( is_stdin_ && data_ != nullptr )
+                {
+                    // Free malloc'd memory for stdin
+                    free ( data_ );
+                }
 #ifdef __linux__
-                munmap ( data_, size_ );
+                else if ( !is_stdin_ && data_ != nullptr )
+                {
+                    munmap ( data_, size_ );
+                }
 
                 if ( __fd != -1 )
                 {
@@ -1238,7 +1280,7 @@ struct __wc_mapped_file
 
 #elif defined(_WIN32)
 
-                if ( data_ != nullptr )
+                else if ( !is_stdin_ && data_ != nullptr )
                 {
                     UnmapViewOfFile ( data_ );
                 }
@@ -1271,6 +1313,7 @@ struct __wc_mapped_file
             __b_cnt = other.__b_cnt;
             __c_cnt = other.__c_cnt;
             mode_ = other.mode_;
+            is_stdin_ = other.is_stdin_;
 
             // Nullify other
             other.data_ = nullptr;
@@ -1290,35 +1333,42 @@ struct __wc_mapped_file
     {
         if ( valid() )
         {
+            if ( is_stdin_ && data_ != nullptr )
+            {
+                // Free malloc'd memory for stdin
+                free ( data_ );
+            }
 #ifdef _WIN32
-
-            if ( data_ != nullptr )
+            else
             {
-                UnmapViewOfFile ( data_ );
-            }
+                if ( data_ != nullptr )
+                {
+                    UnmapViewOfFile ( data_ );
+                }
 
-            if ( hMapFile_ != INVALID_HANDLE_VALUE )
-            {
-                CloseHandle ( hMapFile_ );
-            }
+                if ( hMapFile_ != INVALID_HANDLE_VALUE )
+                {
+                    CloseHandle ( hMapFile_ );
+                }
 
-            if ( hFile_ != INVALID_HANDLE_VALUE )
-            {
-                CloseHandle ( hFile_ );
+                if ( hFile_ != INVALID_HANDLE_VALUE )
+                {
+                    CloseHandle ( hFile_ );
+                }
             }
-
 #else
-
-            if ( data_ != nullptr )
+            else
             {
-                munmap ( data_, size_ );
-            }
+                if ( data_ != nullptr )
+                {
+                    munmap ( data_, size_ );
+                }
 
-            if ( __fd != -1 )
-            {
-                close ( __fd );
+                if ( __fd != -1 )
+                {
+                    close ( __fd );
+                }
             }
-
 #endif // _WIN32
         }
     }
@@ -2569,12 +2619,20 @@ class __wc_internal_class
             }
             mapped_file.clear();
 
+            bool has_files = false;
             for ( const std::string &s : argv )
             {
                 if ( s[0] != '-' && s != argv[0] )
                 {
                     mapped_file.push_back ( fs::__wc_mapped_file ( s, __m ) );
+                    has_files = true;
                 }
+            }
+            
+            // If no files provided, read from stdin
+            if ( !has_files )
+            {
+                mapped_file.push_back ( fs::__wc_mapped_file() );
             }
         }
 };

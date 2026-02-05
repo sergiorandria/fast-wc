@@ -2060,12 +2060,12 @@ class __wc_internal_class
                     total_bytes += var;
                 }
 
-                if ( count_char ) 
-                { 
-                    var = __wc_char_m ( __local_transform, i ); 
-                    mapped_file[i].setCharCnt ( var ); 
-                    __max_char_width = std::max ( __max_bytes_width, detail::__int_width ( var ) ); 
-                    total_char += var; 
+                if ( count_char )
+                {
+                    var = __wc_char_m ( __local_transform, i );
+                    mapped_file[i].setCharCnt ( var );
+                    __max_char_width = std::max ( __max_bytes_width, detail::__int_width ( var ) );
+                    total_char += var;
                 }
             }
         }
@@ -2249,12 +2249,12 @@ class __wc_internal_class
                     __max_bytes_width = detail::__int_width ( var );
                 }
 
-                if ( count_char ) 
+                if ( count_char )
                 {
-                    var = __wc_char_m ( __local_transform, 0 ); 
-                    mapped_file[0].setCharCnt ( var ); 
-                    total_char = var; 
-                    __max_char_width = detail::__int_width ( var ); 
+                    var = __wc_char_m ( __local_transform, 0 );
+                    mapped_file[0].setCharCnt ( var );
+                    total_char = var;
+                    __max_char_width = detail::__int_width ( var );
 
                 }
 
@@ -2267,11 +2267,11 @@ class __wc_internal_class
                 size_t total_line = 0;
                 size_t total_word = 0;
                 size_t total_bytes = 0;
-                size_t total_char = 0; 
+                size_t total_char = 0;
                 size_t max_line_width = 0;
                 size_t max_word_width = 0;
                 size_t max_bytes_width = 0;
-                size_t max_char_width = 0; 
+                size_t max_char_width = 0;
             };
 
             std::vector<ThreadLocalAccumulator> accumulators ( num_threads );
@@ -2325,12 +2325,12 @@ class __wc_internal_class
                             acc.max_bytes_width = std::max ( acc.max_bytes_width, detail::__int_width ( var ) );
                         }
 
-                        if ( count_char ) 
+                        if ( count_char )
                         {
-                            var = __wc_char_m ( __local_transform, i ); 
-                            mapped_file[i].setCharCnt ( var ); 
-                            acc.total_bytes += var; 
-                            acc.max_char_width = std::max ( acc.max_char_width, detail::__int_width ( var ) ); 
+                            var = __wc_char_m ( __local_transform, i );
+                            mapped_file[i].setCharCnt ( var );
+                            acc.total_bytes += var;
+                            acc.max_char_width = std::max ( acc.max_char_width, detail::__int_width ( var ) );
                         }
                     }
                 } ) );
@@ -2346,7 +2346,7 @@ class __wc_internal_class
             total_line = 0;
             total_word = 0;
             total_bytes = 0;
-            total_char = 0; 
+            total_char = 0;
             __max_line_width = 0;
             __max_word_width = 0;
             __max_bytes_width = 0;

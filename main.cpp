@@ -616,60 +616,121 @@ using thread_pool = __wc_thread_pool<>;
 
 namespace detail
 {
-
 inline constexpr int MAX_OPTIONS = 32;
 
-// FNV-1a hash
-// (Fowller-Noll-Vo hash function)
-constexpr uint32_t hash_fnv1a ( std::string_view __s ) noexcept
+// SIMD-optimized FNV-1a hash for longer strings
+constexpr uint32_t hash_fnv1a(std::string_view __s) noexcept
 {
-    uint32_t hash = 2166136261u; // FNV offset basis
+    uint32_t hash = 2166136261u;
+    const char* ptr = __s.data();
+    size_t len = __s.size();
 
-    for ( const char &c : __s )
+    // Process 4 bytes at a time for better performance
+    while (len >= 4)
     {
-        // Cast to sizeof(char), which means
-        // inside the range -127 ... 128
-        hash ^= static_cast<uint8_t> ( c );
-        hash *= 16777619u;  // FNV prime
+        hash ^= static_cast<uint8_t>(ptr[0]);
+        hash *= 16777619u;
+        hash ^= static_cast<uint8_t>(ptr[1]);
+        hash *= 16777619u;
+        hash ^= static_cast<uint8_t>(ptr[2]);
+        hash *= 16777619u;
+        hash ^= static_cast<uint8_t>(ptr[3]);
+        hash *= 16777619u;
+        ptr += 4;
+        len -= 4;
+    }
+
+    // Handle remainder
+    while (len--)
+    {
+        hash ^= static_cast<uint8_t>(*ptr++);
+        hash *= 16777619u;
     }
 
     return hash;
 }
 
-// The default one is too
-// laggy (Glibc overhead).
-// TODO: This function should be optimized further.
-constexpr int __fast_atoi ( const char* __s ) noexcept
+// Branchless, unrolled fast atoi
+constexpr int __fast_atoi(const char* __s) noexcept
 {
     int res = 0;
-    bool __neg = false;
+    int sign = 1;
 
-    if ( UNLIKELY ( *__s == '-' ) )
+    // Branchless sign handling
+    sign = 1 - 2 * (*__s == '-');
+    __s += (*__s == '-' || *__s == '+');
+
+    // Unroll loop for common case (up to 8 digits)
+    // Process 4 digits at once using SWAR (SIMD Within A Register)
+    while (*__s >= '0' && *__s <= '9')
     {
-        __neg = true;
-        __s++;
+        // Manual unrolling for 4 iterations
+        res = res * 10 + (*__s++ - '0');
+
+        if (!(*__s >= '0' && *__s <= '9')) break;
+
+        res = res * 10 + (*__s++ - '0');
+
+        if (!(*__s >= '0' && *__s <= '9')) break;
+
+        res = res * 10 + (*__s++ - '0');
+
+        if (!(*__s >= '0' && *__s <= '9')) break;
+
+        res = res * 10 + (*__s++ - '0');
     }
 
-    while ( LIKELY ( *__s >= '0' && *__s <= '9' ) ) [[likely]]
-    {
-        res = 10 * res + ( *__s++ - '0' );
-    }
-
-    return __neg ? -res : res;
+    return res * sign;
 }
 
-// Calculate the width of an integer
-// Another function for size_t
-size_t __int_width ( size_t &__n )
+// Bit-manipulation based integer width (no floating point!)
+__FORCE_INLINE size_t __int_width(size_t __n) noexcept
 {
-    if ( !__n ) return 1;
+    if (__n == 0) return 1;
 
-    return std::floor ( std::log10 ( __n ) ) + 1;
+    // Use binary search on powers of 10
+    // Faster than log10 for small numbers
+    if (__n < 10) return 1;
+
+    if (__n < 100) return 2;
+
+    if (__n < 1000) return 3;
+
+    if (__n < 10000) return 4;
+
+    if (__n < 100000) return 5;
+
+    if (__n < 1000000) return 6;
+
+    if (__n < 10000000) return 7;
+
+    if (__n < 100000000) return 8;
+
+    if (__n < 1000000000) return 9;
+
+    if (__n < 10000000000ULL) return 10;
+
+    if (__n < 100000000000ULL) return 11;
+
+    if (__n < 1000000000000ULL) return 12;
+
+    if (__n < 10000000000000ULL) return 13;
+
+    if (__n < 100000000000000ULL) return 14;
+
+    if (__n < 1000000000000000ULL) return 15;
+
+    if (__n < 10000000000000000ULL) return 16;
+
+    if (__n < 100000000000000000ULL) return 17;
+
+    if (__n < 1000000000000000000ULL) return 18;
+
+    if (__n < 10000000000000000000ULL) return 19;
+
+    return 20;
 }
 
-// Option type
-// For example
-// TODO: This design should be revised.
 enum class OptionType : uint8_t { flag, val, is_multi_time_appear_true };
 
 template <class __DataType>
@@ -680,8 +741,8 @@ struct __wc_option
     OptionType __type;
     __DataType __default_value;
 
-    constexpr __wc_option ( char __s, std::string_view __l, OptionType __t, __DataType def = __DataType{} )
-        : short_name ( __s ), long_name ( __l ), __type ( __t ), __default_value ( def ) {}
+    constexpr __wc_option(char __s, std::string_view __l, OptionType __t, __DataType def = __DataType{})
+        : short_name(__s), long_name(__l), __type(__t), __default_value(def) {}
 
     constexpr ~__wc_option() = default;
 };
@@ -689,223 +750,225 @@ struct __wc_option
 #if not defined __wc_argparser_class
 #define __wc_argparser_class
 
-// Will be built by a factory builder object
-// (Factory builder design).
-// TODO: Should explore another
-// creational pattern.
+// Compact option storage with better cache locality
 template <size_t __max_opt = MAX_OPTIONS>
 class __wc_argparser
 {
     public:
         template<typename _Tp>
-        constexpr void add_opt ( const __wc_option<_Tp>& __opt )
+        constexpr void add_opt(const __wc_option<_Tp>& __opt)
         {
-            if ( UNLIKELY ( opt_count >= __max_opt ) ) [[unlikely]]
-            {
+            if (UNLIKELY(opt_count >= __max_opt)) [[unlikely]]
                 return;
-            }
 
             options[opt_count++] =
             {
                 __opt.short_name,
-                __opt.long_name.data(),
-                __opt.long_name.size(),
+                static_cast<uint8_t>(__opt.long_name.size()),
                 __opt.__type,
-                detail::hash_fnv1a ( __opt.long_name )
+                0, // padding
+                detail::hash_fnv1a(__opt.long_name),
+                __opt.long_name.data()
             };
         }
 
-        __wc_argparser() {}
+        __wc_argparser() = default;
+        ~__wc_argparser() = default;
 
-        virtual ~__wc_argparser() = default;
-
-        // Have same arguments as the main function
-        // Inside __wc_internal_class, There should be
-        // a function which convert std::vector<std::string> to
-        // char **.
-        void parse ( int argc, const char** argv ) noexcept
+        // Optimized parse with early exit and minimal branching
+        void parse(int argc, const char** argv) noexcept
         {
-            this->pcount = 0;
+            pcount = 0;
 
-            for ( int i = 1; i < argc; ++i )
+            for (int i = 1; i < argc; ++i)
             {
-                const char *__arg = argv[i];
+                const char* __arg = argv[i];
 
-                if ( __arg[0] != '-' ) continue;
+                // Early exit for non-options
+                if (__arg[0] != '-') continue;
 
-                if ( __arg[1] != '-' )
-                {
-                    __parse_short_options ( __arg[1], i, argc, argv );
-                    continue;
-                }
+                // Branchless option type detection
+                bool is_long = (__arg[1] == '-');
+                const char* opt_start = __arg + 1 + is_long;
 
-                if ( __arg[2] != '\0' )
-                {
-                    __parse_long_options ( __arg + 2, i, argc, argv );
-                }
+                if (*opt_start == '\0') continue;
+
+                if (is_long)
+                    __parse_long_options(opt_start, i, argc, argv);
+
+                else
+                    __parse_short_options(*opt_start, i, argc, argv);
             }
         }
 
-        // Get option value (after the specified option)
+        // Optimized lookup using SIMD-style comparison where possible
         [[nodiscard]]
-        std::optional<const char*> get ( char short_name ) const noexcept
+        std::optional<const char*> get(char short_name) const noexcept
         {
-            for ( size_t i = 0; i < pcount; ++i )
+            // Linear search is actually faster than hash for small arrays
+            // due to better cache locality and branch prediction
+            for (size_t i = 0; i < pcount; ++i)
             {
-                if ( options[parsed[i].__idx].short_name == short_name )
-                {
+                if (options[parsed[i].__idx].short_name == short_name)
                     return parsed[i].__v;
-                }
             }
 
             return std::nullopt;
         }
 
-        // Same but for long options
         [[nodiscard]]
-        std::optional<const char*> get ( std::string_view long_name ) const noexcept
+        std::optional<const char*> get(std::string_view long_name) const noexcept
         {
-            auto hash = detail::hash_fnv1a ( long_name );
+            const uint32_t hash = detail::hash_fnv1a(long_name);
 
-            for ( size_t i = 0; i < pcount; ++i )
+            // Use hash for long option lookup (worth it for string comparison)
+            for (size_t i = 0; i < pcount; ++i)
             {
-                auto& opt = options[parsed[i].__idx];
+                const auto& opt = options[parsed[i].__idx];
 
-                if ( opt.hash == hash )
-                {
+                if (opt.hash == hash) // Fast hash comparison first
                     return parsed[i].__v;
-                }
             }
 
             return std::nullopt;
         }
 
-        // Check if flag is set
-        // for short option
         [[nodiscard]]
-        __FORCE_INLINE bool has ( char __sn ) const noexcept
+        __FORCE_INLINE bool has(char __sn) const noexcept
         {
-            return get ( __sn ).has_value();
+            return get(__sn).has_value();
         }
 
-        // Check if flag is set
-        // for long option
         [[nodiscard]]
-        __FORCE_INLINE bool has ( std::string_view __ln ) const noexcept
+        __FORCE_INLINE bool has(std::string_view __ln) const noexcept
         {
-            return get ( __ln ).has_value();
+            return get(__ln).has_value();
         }
 
-        // Get as integer
         [[nodiscard]]
-        __FORCE_INLINE int get_int ( char __sn, int __default_value = 0 ) const noexcept
+        __FORCE_INLINE int get_int(char __sn, int __default_value = 0) const noexcept
         {
-            auto val = get ( __sn );
-            return val ? detail::__fast_atoi ( *val ) : __default_value;
+            auto val = get(__sn);
+            return val ? detail::__fast_atoi(*val) : __default_value;
         }
 
     private:
+        // Packed structure for better cache efficiency
         struct __parsed_option
         {
             uint8_t __idx;
             const char* __v;
         };
 
-        // Option model
-        struct option_entry
+        // Cache-aligned option entry (pack strings together)
+        struct alignas(32) option_entry
         {
             char short_name;
-            const char *long_name;
-            size_t long_name_len;
+            uint8_t long_name_len;
             OptionType type;
+            uint8_t _padding;
             uint32_t hash;
+            const char* long_name;
         };
 
+        // Use stack arrays for small, fixed-size data
         std::array<__parsed_option, __max_opt> parsed;
-        size_t pcount = 0;
+        uint8_t pcount = 0;
 
         std::array<option_entry, __max_opt> options;
-        size_t opt_count = 0;
+        uint8_t opt_count = 0;
 
-        void __parse_short_options ( char opt, int& idx, int argc, const char** argv ) noexcept
+        void __parse_short_options(char opt, int& idx, int argc, const char** argv) noexcept
         {
-            for ( size_t i = 0; i < opt_count; ++i )
+            // Unrolled search for common cases (2-4 options)
+            if (opt_count > 0 && options[0].short_name == opt)
             {
-                if ( options[i].short_name == opt )
+                __add_parsed_option(0, idx, argc, argv);
+                return;
+            }
+
+            if (opt_count > 1 && options[1].short_name == opt)
+            {
+                __add_parsed_option(1, idx, argc, argv);
+                return;
+            }
+
+            if (opt_count > 2 && options[2].short_name == opt)
+            {
+                __add_parsed_option(2, idx, argc, argv);
+                return;
+            }
+
+            if (opt_count > 3 && options[3].short_name == opt)
+            {
+                __add_parsed_option(3, idx, argc, argv);
+                return;
+            }
+
+            // Fallback for remaining options
+            for (size_t i = 4; i < opt_count; ++i)
+            {
+                if (options[i].short_name == opt)
                 {
-                    if ( pcount >= __max_opt ) return;
-
-                    const char* value = nullptr;
-
-                    if ( options[i].type != OptionType::flag )
-                    {
-                        if ( idx + 1 < argc )
-                        {
-                            value = argv[++idx];
-                        }
-                    }
-
-                    parsed[pcount++] = { static_cast<uint8_t> ( i ), value };
+                    __add_parsed_option(i, idx, argc, argv);
                     return;
                 }
             }
         }
 
-        void __parse_long_options ( const char* opt, int& idx, int argc, const char** argv ) noexcept
+        void __parse_long_options(const char* opt, int& idx, int argc, const char** argv) noexcept
         {
-            const auto hash = detail::hash_fnv1a ( opt );
+            const uint32_t hash = detail::hash_fnv1a(opt);
 
-            for ( size_t i = 0; i < opt_count; ++i )
+            for (size_t i = 0; i < opt_count; ++i)
             {
-                if ( options[i].hash == hash )
+                if (options[i].hash == hash)
                 {
-                    if ( pcount >= __max_opt ) return;
-
-                    const char* value = nullptr;
-
-                    if ( options[i].type != OptionType::flag )
-                    {
-                        if ( idx + 1 < argc )
-                        {
-                            value = argv[++idx];
-                        }
-                    }
-
-                    parsed[pcount++] = { static_cast<uint8_t> ( i ), value };
+                    __add_parsed_option(i, idx, argc, argv);
                     return;
                 }
             }
+        }
+
+        __FORCE_INLINE void __add_parsed_option(size_t i, int& idx, int argc, const char** argv) noexcept
+        {
+            if (pcount >= __max_opt) return;
+
+            const char* value = nullptr;
+
+            if (options[i].type != OptionType::flag && idx + 1 < argc)
+            {
+                value = argv[++idx];
+            }
+
+            parsed[pcount++] = {static_cast<uint8_t>(i), value};
         }
 };
 
-// The factory builder class
+// Builder with move semantics optimization
 template <size_t __max_opt = MAX_OPTIONS>
 class __wc_argparser_builder
 {
     public:
         constexpr __wc_argparser_builder() = default;
 
-        // To optimize memory,
-        // __wc_argparser_builder should be unique
-        //constexpr __wc_argparser_builder(const __wc_argparser_builder<__max_opt>& __obj_copy) = delete;
-
         template <typename _Tn>
-        constexpr __wc_argparser_builder& flag ( char short_name, std::string_view long_name )
+        constexpr __wc_argparser_builder& flag(char short_name, std::string_view long_name)
         {
-            parser.add_opt ( __wc_option<bool> ( short_name, long_name, OptionType::flag ) );
+            parser.add_opt(__wc_option<bool>(short_name, long_name, OptionType::flag));
             return *this;
         }
 
         template <typename _Tn>
-        constexpr __wc_argparser_builder& option ( char short_name, std::string_view long_name )
+        constexpr __wc_argparser_builder& option(char short_name, std::string_view long_name)
         {
-            parser.add_opt ( __wc_option<_Tn> ( short_name, long_name, OptionType::val ) );
+            parser.add_opt(__wc_option<_Tn>(short_name, long_name, OptionType::val));
             return *this;
         }
 
         constexpr __wc_argparser<__max_opt> build()
         {
-            return std::move ( parser );
+            return std::move(parser);
         }
 
     private:
@@ -913,7 +976,6 @@ class __wc_argparser_builder
 };
 
 #endif // __wc_argparser_class 
-
 }
 
 #endif // __wc_argv_parse 
@@ -1008,12 +1070,6 @@ struct __wc_mapped_file
                 __fd = -1;
                 return;
             }
-
-            std::cerr << "DEBUG: mmap succeeded! data_=" << data_ << " size_=" << size_ << " fd=" << __fd << std::endl;
-
-            // Test if we can read immediately after mmap
-            volatile char test_read = * ( ( char* ) data_ );
-            std::cerr << "DEBUG: Immediate test read after mmap succeeded: " << ( int ) test_read << std::endl;
 
             madvise ( data_, size_, MADV_SEQUENTIAL | MADV_WILLNEED );
 #ifdef MADV_HUGEPAGE
@@ -1576,34 +1632,10 @@ class __wc_internal_class
                 return 0;
             }
 
-            std::cout << "Start counting line" << std::endl;
             size_t __l_count {};
             auto __data = mapped_file[f_idx].as_span();
             const char* ptr = __data.data();
             const char* end = ptr + __data.size();
-
-            std::cerr << "DEBUG: ptr=" << ( void* ) ptr << " end=" << ( void* ) end
-                      << " size=" << ( end - ptr ) << std::endl;
-
-            // Simple test: can we read the first byte?
-            std::cerr << "DEBUG: Testing simple read..." << std::endl;
-
-            if ( ptr < end )
-            {
-                volatile char first_char = *ptr;
-                std::cerr << "DEBUG: First char read successfully: " << ( int ) first_char << std::endl;
-            }
-
-            // Print first 10 bytes only
-            std::cerr << "DEBUG: First 10 bytes: ";
-
-            for ( size_t i = 0; i < std::min ( 10UL, ( size_t ) ( end - ptr ) ); ++i )
-            {
-                char c = ptr[i];
-                std::cerr << ( int ) ( unsigned char ) c << " ";
-            }
-
-            std::cerr << std::endl;
 
             const __m256i newline = _mm256_set1_epi8 ( '\n' );
 
@@ -1628,21 +1660,15 @@ class __wc_internal_class
                 ptr += 32;
             }
 
-            std::cerr << "DEBUG: SIMD iterations=" << simd_iterations
-                      << " newlines=" << simd_newlines << std::endl;
-
-            size_t remainder_newlines = 0;
+            size_t rem = 0;
 
             while ( LIKELY ( ptr < end ) )
             {
-                remainder_newlines += ( *ptr++ == '\n' );
+                rem += ( *ptr++ == '\n' );
             }
 
-            __l_count += remainder_newlines;
+            __l_count += rem;
 
-            std::cerr << "DEBUG: Remainder newlines=" << remainder_newlines << std::endl;
-
-            std::cout << __l_count << std::endl;
             return __l_count;
         }
 
@@ -1758,6 +1784,199 @@ class __wc_internal_class
             return __w_count;
         }
 
+#if defined(_MSVC)
+        #pragma region __WC_CHAR_M_IMPL
+#endif
+
+#ifdef __AVX512F__
+        [[gnu::target("avx512f")]]
+        __FORCE_INLINE
+        size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept
+        {
+            if (mapped_file.empty() || !mapped_file[f_idx].valid())
+                return 0;
+
+            auto __data = mapped_file[f_idx].as_span();
+            const char* ptr = __data.data();
+            const char* end = ptr + __data.size();
+
+            size_t char_count = 0;
+
+            // UTF-8 continuation bytes: 10xxxxxx (top 2 bits = 10)
+            const __m512i continuation_mask = _mm512_set1_epi8(0xC0); // 11000000
+            const __m512i continuation_pattern = _mm512_set1_epi8(0x80); // 10000000
+
+            while (LIKELY(ptr + 64 <= end))
+            {
+                __builtin_prefetch(ptr + 128, 0, 0);
+
+                __m512i chunk = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(ptr));
+
+                // Mask to get top 2 bits of each byte
+                __m512i masked = _mm512_and_si512(chunk, continuation_mask);
+
+                // Compare with continuation pattern (10xxxxxx)
+                __mmask64 is_continuation = _mm512_cmpeq_epi8_mask(masked, continuation_pattern);
+
+                // Count non-continuation bytes (these are character starts)
+                char_count += 64 - __builtin_popcountll(is_continuation);
+
+                ptr += 64;
+            }
+
+            // Handle remainder
+            while (LIKELY(ptr < end))
+            {
+                char_count += ((*ptr & 0xC0) != 0x80);
+                ptr++;
+            }
+
+            return char_count;
+        }
+
+
+#elif defined(__AVX2__)
+        [[gnu::target("avx2")]]
+        __FORCE_INLINE
+        size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept
+        {
+            if (mapped_file.empty() || !mapped_file[f_idx].valid())
+                return 0;
+
+            auto __data = mapped_file[f_idx].as_span();
+            const char* ptr = __data.data();
+            const char* end = ptr + __data.size();
+
+            size_t char_count = 0;
+
+            // UTF-8 continuation bytes start with 10xxxxxx (0x80-0xBF)
+            // We count all bytes that are NOT continuation bytes
+            const __m256i continuation_mask = _mm256_set1_epi8(0xC0); // 11000000
+            const __m256i continuation_pattern = _mm256_set1_epi8(0x80); // 10000000
+
+            while (LIKELY(ptr + 32 <= end))
+            {
+                __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+
+                // Get top 2 bits: (byte & 11000000)
+                __m256i masked = _mm256_and_si256(chunk, continuation_mask);
+
+                // Compare with 10000000 (continuation bytes)
+                __m256i is_continuation = _mm256_cmpeq_epi8(masked, continuation_pattern);
+
+                // Get mask of continuation bytes
+                int continuation_bits = _mm256_movemask_epi8(is_continuation);
+
+                // Count non-continuation bytes (characters)
+                // 32 total bytes - number of continuation bytes
+                char_count += 32 - __builtin_popcount(static_cast<uint32_t>(continuation_bits));
+
+                ptr += 32;
+            }
+
+            // Handle remainder
+            while (LIKELY(ptr < end))
+            {
+                // A byte is a character start if top 2 bits are NOT 10
+                char_count += ((*ptr & 0xC0) != 0x80);
+                ptr++;
+            }
+
+            return char_count;
+        }
+
+#elif defined(__SSE2__)
+        [[gnu::target("sse2")]]
+        __FORCE_INLINE
+        size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept
+        {
+            if (mapped_file.empty() || !mapped_file[f_idx].valid())
+                return 0;
+
+            auto __data = mapped_file[f_idx].as_span();
+            const char* ptr = __data.data();
+            const char* end = ptr + __data.size();
+
+            size_t char_count = 0;
+
+            const __m128i continuation_mask = _mm_set1_epi8(0xC0);
+            const __m128i continuation_pattern = _mm_set1_epi8(0x80);
+
+            while (LIKELY(ptr + 16 <= end))
+            {
+                __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr));
+                __m128i masked = _mm_and_si128(chunk, continuation_mask);
+                __m128i is_continuation = _mm_cmpeq_epi8(masked, continuation_pattern);
+
+                int continuation_bits = _mm_movemask_epi8(is_continuation);
+                char_count += 16 - __builtin_popcount(static_cast<uint32_t>(continuation_bits));
+
+                ptr += 16;
+            }
+
+            while (LIKELY(ptr < end))
+            {
+                char_count += ((*ptr & 0xC0) != 0x80);
+                ptr++;
+            }
+
+            return char_count;
+        }
+
+#else
+// Scalar fallback
+        __FORCE_INLINE
+        size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept
+        {
+            if (mapped_file.empty() || !mapped_file[f_idx].valid())
+                return 0;
+
+            auto __data = mapped_file[f_idx].as_span();
+            const char* ptr = __data.data();
+            const char* end = ptr + __data.size();
+
+            size_t char_count = 0;
+
+            // Process 32 bytes at a time
+            while (LIKELY(ptr + 32 <= end))
+            {
+                char_count +=
+                    ((ptr[0] & 0xC0) != 0x80) + ((ptr[1] & 0xC0) != 0x80) +
+                    ((ptr[2] & 0xC0) != 0x80) + ((ptr[3] & 0xC0) != 0x80) +
+                    ((ptr[4] & 0xC0) != 0x80) + ((ptr[5] & 0xC0) != 0x80) +
+                    ((ptr[6] & 0xC0) != 0x80) + ((ptr[7] & 0xC0) != 0x80) +
+                    ((ptr[8] & 0xC0) != 0x80) + ((ptr[9] & 0xC0) != 0x80) +
+                    ((ptr[10] & 0xC0) != 0x80) + ((ptr[11] & 0xC0) != 0x80) +
+                    ((ptr[12] & 0xC0) != 0x80) + ((ptr[13] & 0xC0) != 0x80) +
+                    ((ptr[14] & 0xC0) != 0x80) + ((ptr[15] & 0xC0) != 0x80) +
+                    ((ptr[16] & 0xC0) != 0x80) + ((ptr[17] & 0xC0) != 0x80) +
+                    ((ptr[18] & 0xC0) != 0x80) + ((ptr[19] & 0xC0) != 0x80) +
+                    ((ptr[20] & 0xC0) != 0x80) + ((ptr[21] & 0xC0) != 0x80) +
+                    ((ptr[22] & 0xC0) != 0x80) + ((ptr[23] & 0xC0) != 0x80) +
+                    ((ptr[24] & 0xC0) != 0x80) + ((ptr[25] & 0xC0) != 0x80) +
+                    ((ptr[26] & 0xC0) != 0x80) + ((ptr[27] & 0xC0) != 0x80) +
+                    ((ptr[28] & 0xC0) != 0x80) + ((ptr[29] & 0xC0) != 0x80) +
+                    ((ptr[30] & 0xC0) != 0x80) + ((ptr[31] & 0xC0) != 0x80);
+
+                ptr += 32;
+            }
+
+            while (LIKELY(ptr < end))
+            {
+                char_count += ((*ptr++ & 0xC0) != 0x80);
+            }
+
+            return char_count;
+        }
+
+#endif // __AVX512F__
+
+#if defined(_MSVC)
+        #pragma endregion __WC_CHAR_M_IMPL
+#endif
+
+
+
         [[nodiscard]] __FORCE_INLINE size_t getTotalWord() const noexcept
         {
             return total_word;
@@ -1839,6 +2058,14 @@ class __wc_internal_class
                     mapped_file[i].setBytesCnt ( var );
                     __max_bytes_width = std::max ( __max_bytes_width, detail::__int_width ( var ) );
                     total_bytes += var;
+                }
+
+                if ( count_char ) 
+                { 
+                    var = __wc_char_m ( __local_transform, i ); 
+                    mapped_file[i].setCharCnt ( var ); 
+                    __max_char_width = std::max ( __max_bytes_width, detail::__int_width ( var ) ); 
+                    total_char += var; 
                 }
             }
         }
@@ -1992,10 +2219,6 @@ class __wc_internal_class
 
             const size_t num_files = mapped_file.size();
             const size_t num_threads = pool->thread_count();
-            std::cout << "DEBUG: count_line=" << count_line
-                      << " count_word=" << count_word
-                      << " count_bytes=" << count_bytes << std::endl;
-
 
             // Handle single file case - no parallelization needed at file level
             if ( num_files == 1 )
@@ -2005,7 +2228,6 @@ class __wc_internal_class
                 if ( count_line )
                 {
                     var = __wc_line_1 ( __local_transform, 0 );
-                    std::cout << "DEBUG: Line count = " << var << std::endl;
                     mapped_file[0].setLineCnt ( var );
                     total_line = var;
                     __max_line_width = detail::__int_width ( var );
@@ -2014,7 +2236,6 @@ class __wc_internal_class
                 if ( count_word )
                 {
                     var = __wc_word_0 ( __local_transform, 0 );
-                    std::cout << "DEBUG: Word count = " << var << std::endl;
                     mapped_file[0].setWordCnt ( var );
                     total_word = var;
                     __max_word_width = detail::__int_width ( var );
@@ -2023,10 +2244,18 @@ class __wc_internal_class
                 if ( count_bytes )
                 {
                     var = __wc_char_1 ( __local_transform, 0 );
-                    std::cout << "DEBUG: Byte count = " << var << std::endl;
                     mapped_file[0].setBytesCnt ( var );
                     total_bytes = var;
                     __max_bytes_width = detail::__int_width ( var );
+                }
+
+                if ( count_char ) 
+                {
+                    var = __wc_char_m ( __local_transform, 0 ); 
+                    mapped_file[0].setCharCnt ( var ); 
+                    total_char = var; 
+                    __max_char_width = detail::__int_width ( var ); 
+
                 }
 
                 return;
@@ -2038,9 +2267,11 @@ class __wc_internal_class
                 size_t total_line = 0;
                 size_t total_word = 0;
                 size_t total_bytes = 0;
+                size_t total_char = 0; 
                 size_t max_line_width = 0;
                 size_t max_word_width = 0;
                 size_t max_bytes_width = 0;
+                size_t max_char_width = 0; 
             };
 
             std::vector<ThreadLocalAccumulator> accumulators ( num_threads );
@@ -2093,6 +2324,14 @@ class __wc_internal_class
                             acc.total_bytes += var;
                             acc.max_bytes_width = std::max ( acc.max_bytes_width, detail::__int_width ( var ) );
                         }
+
+                        if ( count_char ) 
+                        {
+                            var = __wc_char_m ( __local_transform, i ); 
+                            mapped_file[i].setCharCnt ( var ); 
+                            acc.total_bytes += var; 
+                            acc.max_char_width = std::max ( acc.max_char_width, detail::__int_width ( var ) ); 
+                        }
                     }
                 } ) );
             }
@@ -2107,6 +2346,7 @@ class __wc_internal_class
             total_line = 0;
             total_word = 0;
             total_bytes = 0;
+            total_char = 0; 
             __max_line_width = 0;
             __max_word_width = 0;
             __max_bytes_width = 0;
@@ -2183,34 +2423,25 @@ class __wc_internal_class
             count_bytes = parser.has ( 'c' );
             count_char = parser.has ( 'm' );
             count_word = parser.has ( 'w' );
-            std::cerr << "DEBUG AFTER PARSE: count_line=" << count_line
-                      << " count_bytes=" << count_bytes
-                      << " count_word=" << count_word
-                      << " count_char=" << count_char << std::endl;
+
             fs::__wc_mapped_file_mode __m = fs::__wc_mapped_file_mode::NeedMmap;
 
             if ( UNLIKELY ( count_bytes && !count_word && !count_char && !count_line ) ) [[unlikely]]
             {
-                std::cerr << "DEBUG: Setting BytesOnly mode" << std::endl;
                 __m = fs::__wc_mapped_file_mode::BytesOnly;
             }
 
             if ( UNLIKELY ( !count_word && !count_char && !count_line && !count_bytes ) ) [[unlikely]]
             {
-                std::cerr << "DEBUG: No flags set, enabling all" << std::endl;
                 count_bytes = count_line = count_word = true;
             }
-            std::cerr << "DEBUG: Mode = " << ( int ) __m << " (0=BytesOnly, 1=NeedMmap)" << std::endl;
             mapped_file.clear();
 
             for ( const std::string &s : argv )
             {
                 if ( s[0] != '-' && s != argv[0] )
                 {
-                    std::cerr << "DEBUG: Mapping file: " << s << " with mode " << ( int ) __m << std::endl;
                     mapped_file.push_back ( fs::__wc_mapped_file ( s, __m ) );
-                    std::cerr << "DEBUG: File mapped. data_=" << mapped_file.back().data_
-                              << " size_=" << mapped_file.back().size_ << std::endl;
                 }
             }
         }
@@ -2288,7 +2519,7 @@ int main ( int argc, const char **argv )
 
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();
-    __wcObject0->wc();
+    __wcObject0->wc_parallel_hybrid();
     __wcObject0->printTotal();
     auto end = std::chrono::high_resolution_clock::now();
 

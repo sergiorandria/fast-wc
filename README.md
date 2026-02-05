@@ -149,8 +149,6 @@ Manual build example (if you prefer `g++` directly — adapt to your toolchain):
 g++ -std=c++17 -O3 -march=native -pipe -o wc src/main.cpp src/wc_parser.cpp
 ```
 
-*(If you want, I can add a `CMakeLists.txt` and `BUILD.md` with cross-platform instructions.)*
-
 ---
 
 ## Usage examples
@@ -207,6 +205,7 @@ This repository is a research artifact. If you use `fast-wc` or its results in a
 License: **GPL-3.0** (see `LICENSE` file).
 
 ---
+
 
 
 

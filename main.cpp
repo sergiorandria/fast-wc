@@ -50,12 +50,12 @@
 
 #if defined(_POSIX_VERSION) && _POSIX_VERSION >= 200809L
     
-    #include <sys/mman.h>
-    #include <fcntl.h>
-    #include <sys/stat.h>
-    #include <errno.h>
-    #include <string.h>
-    #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
     
 #endif // _POSIX_VERSION
 
@@ -2250,8 +2250,6 @@ class __wc_internal_class {
     
     std::vector<fs::__wc_mapped_file> mapped_file;
     
-    // TODO: Implement __parse_argv()
-    //
     // argv is already a member of the class
     inline void __parse_argv() {
         // Check for --version and --help first

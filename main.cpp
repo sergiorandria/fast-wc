@@ -17,12 +17,12 @@
 */
 
 #ifndef _GNU_SOURCE
-    #define _GNU_SOURCE
+#define _GNU_SOURCE
 #endif // _GNU_SOURCE
 
 
 #ifdef _WIN32
-    #include <windows.h>
+#include <windows.h>
 #endif // _WIN32
 
 #include <immintrin.h>
@@ -47,6 +47,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <mutex> 
+#include <cerrno> 
 
 #if defined(_POSIX_VERSION) && _POSIX_VERSION >= 200809L
     
@@ -63,11 +64,16 @@
 #define __wc_lib_use_std_atomic
 
 #if __cplusplus >= 202002L
-    #define __cpp_lib_use_likely
+#define __cpp_lib_use_likely
     // Can use C++20 [[likely]] for branch
     // prediction.
     
 #endif // __cplusplus
+
+#define WC_EXIT_CODE_FAILURE      -1 
+#define WC_EXIT_CODE_SUCCESS       0 
+#define WC_EXIT_CODE_ERROR         1 
+#define WC_EXIT_CODE_UNKNOWN       2 
 
 #define LIKELY(x) (__builtin_expect(!!(x), 1))
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
@@ -196,13 +202,13 @@ class task_wrapper {
                 other.invoke_fn = nullptr;
                 other.destroy_fn = nullptr;
                 other.move_fn = nullptr;
-            }
-            else {
+            } else {
                 invoke_fn = nullptr;
                 destroy_fn = nullptr;
                 move_fn = nullptr;
             }
         }
+        
         return *this;
     }
     
@@ -529,6 +535,7 @@ constexpr uint32_t hash_fnv1a(std::string_view __s) noexcept {
     uint32_t hash = 2166136261u;
     const char *ptr = __s.data();
     size_t len = __s.size();
+
     // Process 4 bytes at a time for better performance
     while (len >= 4) {
         hash ^= static_cast<uint8_t>(ptr[0]);
@@ -1042,21 +1049,24 @@ struct __wc_mapped_file {
             
             if (UNLIKELY((__fd = open(filename_.c_str(), O_RDONLY)) == -1))
                 [[unlikely]] {
-                return;
+                
+                std::cerr << "Cannot open " << filename_ << ":"; 
+                std::perror("open()"); 
+                std::exit(WC_EXIT_CODE_FAILURE); 
             }
             
             if (UNLIKELY(fstat(__fd, &__sb) == -1))
                 [[unlikely]] {
                 close(__fd);
                 __fd = -1;
-                return;
+                std::exit(WC_EXIT_CODE_FAILURE); 
             }
             
             if (UNLIKELY((size_ = __sb.st_size) == 0))
                 [[unlikely]] {
                 close(__fd);
                 __fd = -1;
-                return;
+                std::exit(WC_EXIT_CODE_FAILURE); 
             }
             
             

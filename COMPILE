@@ -1,1 +1,0 @@
-g++ -O3 -march=native -static -s -fno-rtti -ffunction-sections -fdata-sections -Wl,--gc-section main.cpp -ffast-math -std=c++23 -o wc

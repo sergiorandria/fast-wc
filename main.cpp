@@ -69,7 +69,8 @@
     // prediction.
     
 #endif // __cplusplus
-
+ 
+// Exit code 
 #define WC_EXIT_CODE_FAILURE      -1 
 #define WC_EXIT_CODE_SUCCESS       0 
 #define WC_EXIT_CODE_ERROR         1 
@@ -809,7 +810,6 @@ class __wc_argparser {
     }
     
   private:
-    // Packed structure for better cache efficiency
     struct __parsed_option {
         uint8_t __idx;
         const char *__v;
@@ -833,7 +833,6 @@ class __wc_argparser {
     uint8_t opt_count = 0;
     
     void __parse_short_options(char opt, int &idx, int argc, const char** argv) noexcept {
-        // Unrolled search for common cases (2-4 options)
         if (opt_count > 0 && options[0].short_name == opt) {
             __add_parsed_option(0, idx, argc, argv);
             return;
@@ -850,7 +849,6 @@ class __wc_argparser {
             __add_parsed_option(3, idx, argc, argv);
             return;
         }
-        // Fallback for remaining options
         for (size_t i = 4; i < opt_count; ++i) {
             if (options[i].short_name == opt) {
                 __add_parsed_option(i, idx, argc, argv);
@@ -2271,7 +2269,8 @@ class __wc_internal_class {
                           << "This is free software: you are free to change and redistribute it.\n"
                           << "There is NO WARRANTY, to the extent permitted by law.\n"
                           << "Written by Sergio Randriamihoatra.\n";
-                std::exit(0);
+                
+                std::exit(WC_EXIT_CODE_SUCCESS);
             }
 
             if (arg == "--help") {
@@ -2298,9 +2297,11 @@ class __wc_internal_class {
                           << "      --version     output version information and exit\n"
                           << "\n"
                           << "Report bugs to: sergiorandriamihoatra@gmail.com\n";
-                std::exit(0);
+                
+                          std::exit(WC_EXIT_CODE_SUCCESS);
             }
         }
+
         auto pb = __wc_argparser_builder<>()
                   .flag<bool> ('l', "lines"sv)
                   .flag<bool> ('c', "bytes"sv)
@@ -2335,12 +2336,12 @@ class __wc_internal_class {
         bool has_files = false;
         for (const std::string &s : argv) {
             if (s != argv[0]) {
-                // Handle "-" as stdin
+                // stdin
                 if (s == "-") {
                     mapped_file.push_back(fs::__wc_mapped_file());
                     has_files = true;
                 }
-                // Skip flags (starting with -)
+                // Skip flags
                 else if (s[0] != '-') {
                     mapped_file.push_back(fs::__wc_mapped_file(s, __m));
                     has_files = true;

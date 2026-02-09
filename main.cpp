@@ -40,7 +40,6 @@
 #include <ranges>
 #include <span>
 #include <array>
-#include <cmath>
 #include <future>
 #include <condition_variable>
 #include <queue>
@@ -1566,7 +1565,7 @@ class __wc_internal_class {
     // Linear implementation, not really the good one.
     size_t __wc_line_0(Translation translation = std::identity{}) {
         size_t __l_count {};
-        std::ifstream file(this->argv[1], std::ios::binary || std::ios::ate);
+        std::ifstream file(this->argv[1], std::ios::binary | std::ios::ate);
         std::stringstream buffer;
 
         buffer << file.rdbuf();

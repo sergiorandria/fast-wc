@@ -3115,29 +3115,26 @@ wc_class_instance =
 //
 // Under which assumptions this last statement is true ?
 int main(int argc, const char **argv) {
-    std::cout.sync_with_stdio(false);
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
-    auto __wcObject0 =
-        wc_class::__wc_internal_class<std::char_traits<char>,
-        std::function<std::char_traits<char> (std::char_traits<char>) >>::Instance();
-    auto __wcObject1 =
-        wc_class::__wc_internal_class<std::char_traits<wchar_t>, std::vector<char>>::Instance();
-#if __cplusplus >= 202002L
-    auto __wcObject2 =
-        wc_class::__wc_internal_class<std::char_traits<char8_t>, std::vector<char>>::Instance();
-#endif // __cplusplus
-    auto __wcObject3 =
-        wc_class::__wc_internal_class<std::char_traits<char16_t>, std::vector<char>>::Instance();
-    auto __wcObject4 =
-        wc_class::__wc_internal_class<std::char_traits<char32_t>, std::vector<char>>::Instance();
-    __wcObject0->init(argc, argv);
+    auto __wcObject =
+        wc_class::__wc_internal_class<std::char_traits<char>, std::function<std::char_traits<char> (std::char_traits<char>) >>::Instance();
+
+    __wcObject->init(argc, argv);
+    
+#ifdef BENCHMARK 
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();
-    __wcObject0->wc_parallel_hybrid();
-    __wcObject0->printTotal();
+#endif // BENCHMARK
+
+    __wcObject->wc_parallel_hybrid();
+    __wcObject->printTotal();
+
+    #ifdef BENCHMARK 
     auto end = std::chrono::high_resolution_clock::now();
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds> (end - start);
     std::cout << ns.count() << " ns\n";
+#endif // BENCHMARK
+
     return 0;
 }

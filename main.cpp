@@ -3130,7 +3130,7 @@ int main(int argc, const char **argv) {
     __wcObject->wc_parallel_hybrid();
     __wcObject->printTotal();
 
-    #ifdef BENCHMARK 
+#ifdef BENCHMARK 
     auto end = std::chrono::high_resolution_clock::now();
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds> (end - start);
     std::cout << ns.count() << " ns\n";

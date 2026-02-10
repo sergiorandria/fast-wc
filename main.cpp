@@ -91,6 +91,16 @@
 #include <strsafe.h>
 
 // For logging
+
+/**
+ * @brief Displays the last Windows system error for a given function.
+ *
+ * This function retrieves the last error code using `GetLastError()`,
+ * formats the corresponding system error message, and prints it along
+ * with the provided function name.
+ *
+ * @param lpszFunction The name of the function that failed.
+ */
 void display_error(LPCTSTR lpszFunction)
 // Routine Description:
 // Retrieve and output the system error message for the last-error code
@@ -225,13 +235,20 @@ class task_wrapper {
   private:
     alignas(std::max_align_t) char buffer[BufferSize];
     
+    // Initializing pointer function to nullptr. A task can be 
+    // either invoked (and to the appropriate action according to invoked), 
+    // either destroyed, or moved (for memory optimization). 
     void (*invoke_fn)(void*) = nullptr;
     void (*destroy_fn)(void*) = nullptr;
     void (*move_fn)(void*, void*) = nullptr;
     
   public:
     task_wrapper() = default;
-    
+   
+    // Construct a type-erased callable stored in an internal fixed-size buffer.
+    // The callable must be invocable with signature void().
+    // Compile-time checks ensure size, alignment, and callability constraints.
+    // Stores function pointers for invocation, destruction, and move operations.
     template<typename F> task_wrapper(F&& f) {
         using DecayF = std::decay_t<F>;
         
@@ -256,19 +273,25 @@ class task_wrapper {
         };
     }
     
+    // Move constructor.
+    // Transfers ownership of the stored callable from another wrapper.
+    // Leaves the source wrapper in an empty state.
     task_wrapper(task_wrapper&& other) noexcept {
         if (other.invoke_fn) 
         {
             other.move_fn(other.buffer, buffer);
-            invoke_fn = other.invoke_fn;
-            destroy_fn = other.destroy_fn;
-            move_fn = other.move_fn;
-            other.invoke_fn = nullptr;
-            other.destroy_fn = nullptr;
-            other.move_fn = nullptr;
+            invoke_fn           = other.invoke_fn;
+            destroy_fn          = other.destroy_fn;
+            move_fn             = other.move_fn;
+            other.invoke_fn     = nullptr;
+            other.destroy_fn    = nullptr;
+            other.move_fn       = nullptr;
         }
     }
     
+    // Move assignment operator.
+    // Destroys current callable if present, then moves the callable from source.
+    // Ensures proper cleanup and leaves source empty.
     task_wrapper &operator=(task_wrapper&& other) noexcept {
         if (this != &other) 
         {
@@ -296,12 +319,14 @@ class task_wrapper {
         return *this;
     }
     
+    // Invoke the stored callable if present
     void operator()() {
         if (invoke_fn) {
             invoke_fn(buffer);
         }
     }
     
+    // Check if the wrapper currently holds a valid callable or not. 
     explicit operator bool() const {
         return invoke_fn != nullptr;
     }
@@ -312,11 +337,24 @@ class task_wrapper {
         }
     }
     
+    // Delete copy constructor
     task_wrapper(const task_wrapper &) = delete;
     task_wrapper &operator= (const task_wrapper &) = delete;
 };
 
 // Per-thread queue with cache line alignment
+// 
+// `aligned_task_queue` encapsulates a FIFO queue of `task_wrapper<>`
+// instances protected by a `std::mutex` for thread-safe access.
+// The structure is explicitly aligned to `CACHE_LINE_SIZE` in order
+// to minimize false sharing when multiple queues are placed in
+// contiguous memory (e.g., thread pools or work-stealing schedulers).
+//
+// Move construction and move assignment transfer ownership of the
+// underlying task queue, while the mutex is default-constructed
+// since `std::mutex` is non-movable. Copy operations are disabled
+// to preserve synchronization correctness and avoid accidental
+// duplication of shared state.
 struct alignas(CACHE_LINE_SIZE) aligned_task_queue {
     std::queue<task_wrapper<>> tasks;
     std::mutex mutex;
@@ -344,6 +382,9 @@ class __wc_thread_pool {
     __wc_thread_pool(const __wc_thread_pool &) = delete;
     __wc_thread_pool &operator= (const __wc_thread_pool &) = delete;
     
+    // Singleton implementation, primary class are all 
+    // unique and private instance can be get via the public method 
+    // T* Instance() { ... }; 
     static __wc_thread_pool *Instance() {
         std::call_once(__init_flag, []() {
             __instance.reset(new __wc_thread_pool());
@@ -351,8 +392,25 @@ class __wc_thread_pool {
 
         return __instance.get();
     }
-    
-    // Submit a task and get a future for the result
+   
+    /**
+    * @brief Submits a callable to the thread pool and returns a future to its result.
+    *
+    * @tparam F Callable type.
+    * @tparam Args Argument types.
+    * @param fn Callable object to execute.
+    * @param args Arguments forwarded to the callable.
+    * @return std::future holding the result of the asynchronous computation.
+    *
+    * @details
+    * Wraps the callable into a `std::packaged_task`, enqueues it using
+    * round-robin distribution across aligned task queues, and notifies
+    * one worker thread. Throws `std::runtime_error` if submission occurs
+    * after the pool has been stopped.
+    *
+    * @note Exceptions thrown during task execution are caught internally
+    * to prevent worker thread termination.
+    */
     template<typename F, typename... Args>
     auto submit(F&& fn, Args&&... args) -> std::future<typename std::invoke_result<F, Args...>::type> {
         using return_type = typename std::invoke_result<F, Args...>::type;
@@ -387,8 +445,23 @@ class __wc_thread_pool {
         } __tp_cv.notify_one();
         return res;
     }
-    
-    // Enqueue a void task
+   
+    /**
+    * @brief Enqueues a void task into the thread pool.
+    *
+    * @param task Callable object with signature `void()`.
+    *
+    * @details
+    * Inserts the task into one of the internal queues using a round-robin
+    * strategy to reduce contention between worker threads. The task is
+    * wrapped in a lambda that catches all exceptions to prevent worker
+    * termination. A worker thread is notified after successful insertion.
+    *
+    * @throws std::runtime_error if the thread pool has already been stopped.
+    *
+    * @note Uses atomic counters and per-queue mutexes to maintain
+    * thread-safe submission and accurate tracking of active tasks.
+    */
     void enqueue(std::function<void() > task) {
         {
             std::unique_lock<std::mutex> lock(__submit_mutex);
@@ -410,8 +483,31 @@ class __wc_thread_pool {
         }
         __tp_cv.notify_one();
     }
-    
-    // Batch enqueue for better performance
+   
+    /**
+    * @brief Enqueues a batch of void tasks into the thread pool.
+    *
+    * @tparam Iterator Iterator type pointing to callable objects
+    *                  with signature `void()`.
+    * @param begin Iterator to the first task in the batch.
+    * @param end   Iterator to one-past-the-last task.
+    *
+    * @details
+    * Inserts multiple tasks in a single submission phase to reduce
+    * synchronization overhead. Tasks are distributed across internal
+    * queues using a round-robin strategy to minimize contention.
+    * Each task is wrapped in a lambda that catches all exceptions
+    * to avoid worker thread termination.
+    *
+    * The number of active tasks is updated atomically once per batch.
+    * Worker threads are notified using `notify_one()` for a single
+    * task or `notify_all()` when multiple tasks are added.
+    *
+    * @throws std::runtime_error if the thread pool has been stopped.
+    *
+    * @note Submission is protected by a global submit mutex while
+    * individual queues use dedicated mutexes for localized locking.
+    */
     template<typename Iterator>
     void enqueue_batch(Iterator begin, Iterator end) {
         size_t count = 0;
@@ -445,7 +541,19 @@ class __wc_thread_pool {
         }
     }
     
-    // Graceful shutdown with timeout
+    // Gracefully stops the thread pool and waits for worker threads to finish.
+    //
+    // Sets the stop flag to prevent new task submissions, then wakes all
+    // worker threads so they can exit once pending work is done.
+    //
+    // The caller can specify a timeout duration (default: 5 seconds).
+    // Threads are joined while time remains before the deadline.
+    // If the timeout is exceeded, remaining joinable threads are detached
+    // to avoid blocking shutdown indefinitely.
+    //
+    // Note:
+    // - Detaching threads means they may continue running in background.
+    // - Safe shutdown assumes workers periodically check the stop flag.
     void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
         {
             std::unique_lock<std::mutex> lock(__submit_mutex);
@@ -475,22 +583,46 @@ class __wc_thread_pool {
         shutdown();
     }
     
+    // Returns the number of worker threads configured in the pool.
+    //
+    // This reflects the compile-time or fixed configuration (N_CORE),
+    // not necessarily the number of currently running OS threads.
     size_t thread_count() const {
         return N_CORE;
     }
-    
+
+    // Returns the number of tasks currently marked as active.
+    //
+    // The value is read atomically with acquire semantics to ensure
+    // visibility of task state across threads.
     size_t active_tasks() const {
         return __active_tasks.load(std::memory_order_acquire);
     }
-    
-    // Wait for all tasks to complete
+
+    // Blocks until all active tasks have completed.
+    //
+    // Uses a spin-wait loop with std::this_thread::yield() to reduce
+    // contention while waiting. Intended for short waits; for longer
+    // waits a condition variable would be more efficient.
     void wait_all() {
         while (__active_tasks.load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
         }
     }
-    
+
   private:
+    // Constructs the thread pool and spawns worker threads.
+    //
+    // Initializes the per-core task queues and determines the number
+    // of hardware threads available on the system.
+    //
+    // Reserves space for worker thread objects to avoid reallocations,
+    // then launches N_CORE worker threads. Each thread executes the
+    // internal worker loop bound to its logical queue index.
+    //
+    // Assumptions:
+    // - N_CORE represents the number of worker queues/threads desired.
+    // - worker_thread(size_t id) handles task fetching and execution.
     __wc_thread_pool()
         : __queues(N_CORE) {
         __cpu_core = std::thread::hardware_concurrency();
@@ -509,7 +641,30 @@ class __wc_thread_pool {
         }
     }
     
-    // Worker thread with work stealing
+    // Main worker loop executed by each thread in the pool.
+    //
+    // Execution model:
+    //  - Each worker primarily consumes tasks from its own queue to
+    //    preserve cache locality and reduce contention.
+    //  - If its queue is empty, the worker attempts work stealing
+    //    from other queues using a non-blocking try_to_lock strategy.
+    //  - When no work is available, the thread blocks on a condition
+    //    variable until new tasks arrive or shutdown is requested.
+    //
+    // Task lifecycle:
+    //  - Tasks are executed via task_wrapper<> abstraction.
+    //  - After execution, the global active task counter is decremented
+    //    using release semantics to synchronize with waiters.
+    //
+    // Shutdown behavior:
+    //  - When stop flag is set, the worker drains remaining tasks from
+    //    its own queue before exiting to ensure graceful termination.
+    //  - No further stealing is performed during shutdown phase.
+    //
+    // Concurrency notes:
+    //  - Queue-level mutexes minimize contention between workers.
+    //  - Work stealing improves load balancing under uneven workloads.
+    //  - Condition variable prevents busy spinning when the system is idle.
     void worker_thread(size_t thread_id) {
         while (true) {
             task_wrapper<> task;
@@ -862,8 +1017,35 @@ __FORCE_INLINE size_t __int_width(size_t __n) noexcept {
     return 20;
 }
 
+// Every option with the wc is a OptionType::flag, 
+// the value val is just there for knowledge. The 
+// is_multi_time_appear_true_v is for std::logic() error, and option 
+// should be construct once. 
 enum class OptionType : uint8_t { flag, val, is_multi_time_appear_true_v };
-
+ 
+/**
+ * @brief Represents a single command-line option for a word-count-like utility.
+ *
+ * This templated structure defines a command-line option with a short
+ * name, long name, type, and default value. It enforces uniqueness and
+ * prevents multiple instantiations or unintended copies/moves to reduce
+ * logic errors and memory overhead.
+ *
+ * @tparam __DataType The type of the option's value (e.g., `int`, `bool`).
+ *
+ * @note
+ * - The constructor checks `OptionType::is_multi_time_appear_true_v` and
+ *   throws a `std::logic_error` if an option is constructed multiple times.
+ * - Copying and moving of this object is explicitly deleted to avoid
+ *   accidental duplication or memory issues.
+ * - Designed to be `constexpr` where possible, allowing compile-time
+ *   initialization of options.
+ *
+ * @warning
+ * - Throws `std::logic_error` if an option marked as unique is constructed
+ *   more than once.
+ * - Does not perform deep validation of `long_name` or `short_name`.
+ */
 template <class __DataType>
 struct __wc_option {
     char short_name;
@@ -916,7 +1098,18 @@ class __wc_argparser {
     __wc_argparser() = default;
     ~__wc_argparser() = default;
     
-    // Optimized parse with early exit and minimal branching
+    /**
+    * @brief Parses command-line arguments for short and long options.
+    *
+    * Iterates over `argv`, skipping non-option arguments, and dispatches
+    * each option to the appropriate parser (`__parse_short_options` or
+    * `__parse_long_options`). Designed for minimal overhead in hot paths.
+    *
+    * @param argc Number of command-line arguments.
+    * @param argv Array of argument strings.
+    *
+    * @note noexcept guarantees no exceptions are thrown.
+    */ 
     void parse(int argc, const char** argv) noexcept {
         pcount = 0;
         
@@ -974,29 +1167,58 @@ class __wc_argparser {
         return std::nullopt;
     }
     
+    /**
+    * @brief Checks if an option with the given short name exists.
+    * @param __sn Short option character.
+    * @return true if the option is present, false otherwise.
+    */
     [[nodiscard]]
     __FORCE_INLINE bool has(char __sn) const noexcept {
         return get(__sn).has_value();
     }
-    
+
+    /**
+    * @brief Checks if an option with the given long name exists.
+    * @param __ln Long option string.
+    * @return true if the option is present, false otherwise.
+    */
     [[nodiscard]]
     __FORCE_INLINE bool has(std::string_view __ln) const noexcept {
         return get(__ln).has_value();
     }
-    
+
+    /**
+    * @brief Retrieves the integer value of an option by short name.
+    * @param __sn Short option character.
+    * @param __default_value Value returned if the option is absent (default 0).
+    * @return The parsed integer value or `__default_value` if not set.
+    */
     [[nodiscard]]
     __FORCE_INLINE int get_int(char __sn, int __default_value = 0) const noexcept {
         auto val = get(__sn);
         return val ? detail::__fast_atoi(*val) : __default_value;
     }
-    
+
   private:
     struct __parsed_option {
-        uint8_t __idx;
-        const char *__v;
+        uint8_t __idx;          // The index of the option in argv
+        const char *__v;        // The raw content of the option value
     };
-    
-    // Cache-aligned option entry (pack strings together)
+
+   /**
+    * @brief Memory-aligned representation of a command-line option.
+    *
+    * Stores both short and long names, the option type, and a precomputed
+    * hash for fast lookup. Aligned to 32 bytes for cache efficiency.
+    *
+    * Members:
+    * - `short_name` : Single-character short option.
+    * - `long_name_len` : Length of the long option string.
+    * - `type` : Option type (e.g., flag, value, etc.).
+    * - `_padding` : Padding for alignment.
+    * - `hash` : Precomputed hash of the long option name.
+    * - `long_name` : Pointer to the long option string.
+    */ 
     struct alignas(32) option_entry {
         char short_name;
         uint8_t long_name_len;
@@ -1007,12 +1229,26 @@ class __wc_argparser {
     };
     
     // Use stack arrays for small, fixed-size data
-    std::array<__parsed_option, __max_opt> parsed;
-    uint8_t pcount = 0;
+    std::array<__parsed_option, __max_opt> parsed;      // Correct parsed option
+    uint8_t pcount = 0;                                 // parsed option count 
     
-    std::array<option_entry, __max_opt> options;
-    uint8_t opt_count = 0;
+    std::array<option_entry, __max_opt> options;        // options from argv
+    uint8_t opt_count = 0;                              // option count
     
+    /**
+    * @brief Parses a single short option and dispatches it.
+    *
+    * Checks the registered short options for a match with `opt`. If found,
+    * calls `__add_parsed_option` to process it. Optimized for the first
+    * few options to avoid looping.
+    *
+    * @param opt The short option character to parse (e.g., 'h').
+    * @param idx Reference to the current argument index in `argv`.
+    * @param argc Total number of command-line arguments.
+    * @param argv Array of argument strings.
+    *
+    * @note noexcept guarantees that this function does not throw exceptions.
+    */
     void __parse_short_options(char opt, int &idx, int argc, const char** argv) noexcept {
         if (opt_count > 0 && options[0].short_name == opt) {
             __add_parsed_option(0, idx, argc, argv);
@@ -1037,7 +1273,21 @@ class __wc_argparser {
             }
         }
     }
-    
+
+    /**
+    * @brief Parses a single long option by its name.
+    *
+    * Computes the FNV-1a hash of `opt` and searches registered options
+    * for a matching hash. If found, delegates processing to
+    * `__add_parsed_option`.
+    *
+    * @param opt Pointer to the long option string (without leading "--").
+    * @param idx Reference to the current argument index in `argv`.
+    * @param argc Total number of command-line arguments.
+    * @param argv Array of argument strings.
+    *
+    * @note noexcept guarantees this function does not throw exceptions.
+    */
     void __parse_long_options(const char* opt, int &idx, int argc, const char** argv) noexcept {
         const uint32_t hash = detail::hash_fnv1a(opt);
 
@@ -1048,7 +1298,21 @@ class __wc_argparser {
             }
         }
     }
-    
+
+    /**
+    * @brief Parses a single long option by its name.
+    *
+    * Computes the FNV-1a hash of `opt` and searches registered options
+    * for a matching hash. If found, delegates processing to
+    * `__add_parsed_option`.
+    *
+    * @param opt Pointer to the long option string (without leading "--").
+    * @param idx Reference to the current argument index in `argv`.
+    * @param argc Total number of command-line arguments.
+    * @param argv Array of argument strings.
+    *
+    * @note noexcept guarantees this function does not throw exceptions.
+    */
     __FORCE_INLINE void __add_parsed_option(size_t i, int &idx, int argc, const char** argv) noexcept {
         if (pcount >= __max_opt) {
             return;
@@ -1347,7 +1611,18 @@ struct __wc_mapped_file {
 #endif
     }
     
-    // Move assignment
+    /**
+    * @brief Move-assigns a mapped file, transferring ownership of resources.
+    *
+    * Releases any existing resources held by `*this` before taking ownership
+    * of `other`'s memory mapping, file handles, counters, and metadata.
+    * After the move, `other` is left in a null/empty state.
+    *
+    * @param other Temporary `__wc_mapped_file` to move from.
+    * @return Reference to `*this`.
+    *
+    * @note noexcept guarantees no exceptions during move.
+    */
     __wc_mapped_file &operator= (__wc_mapped_file&& other) noexcept {
         if (this != &other) {
             // Clean up existing resources
@@ -1408,6 +1683,9 @@ struct __wc_mapped_file {
         return *this;
     }
     
+    /** Frees allocated memory for stdin, unmaps mapped files, and closes
+      * OS file descriptors/handles depending on platform.
+      */ 
     virtual ~__wc_mapped_file() {
         if (valid()) {
             if (is_stdin_ && data_ != nullptr) {
@@ -1442,64 +1720,44 @@ struct __wc_mapped_file {
         }
     }
     
+    /**
+    * @brief Returns the file contents as a read-only span.
+    * @return std::span<const char> Span over the mapped data, or empty if BytesOnly mode or data is null.
+    */
     [[nodiscard]] __FORCE_INLINE std::span<const char> as_span() const noexcept {
-        // If BytesOnly mode, data_ is nullptr, so return empty span
-        if (mode_ == __wc_mapped_file_mode::BytesOnly || data_ == nullptr) {
-            return {};
-        }
+        if (mode_ == __wc_mapped_file_mode::BytesOnly || data_ == nullptr) return {};
+        return { static_cast<const char*>(data_), size_ };
+    }
 
-        return { static_cast<const char *> (data_), size_ };
-    }
-    
+    /**
+    * @brief Checks if the mapped file object is valid.
+    * @return true if mapped data exists or size is non-zero, false otherwise.
+    */
     [[nodiscard]] __FORCE_INLINE bool valid() const noexcept {
-        if (mode_ == __wc_mapped_file_mode::NeedMmap) {
-            return data_ != nullptr;
-        } else {
-            return size_ > 0;
-        }
+        return (mode_ == __wc_mapped_file_mode::NeedMmap) ? data_ != nullptr : size_ > 0;
     }
-    
-    [[nodiscard]] __FORCE_INLINE size_t size() const noexcept {
-        return size_;
-    }
-    
-    [[nodiscard]] __FORCE_INLINE std::string filename() const noexcept {
-        return filename_;
-    }
-    
-    // Setter
-    __FORCE_INLINE void setWordCnt(const size_t w_cnt) noexcept {
-        __w_cnt = w_cnt;
-    }
-    
-    __FORCE_INLINE void setLineCnt(const size_t l_cnt) noexcept {
-        __l_cnt = l_cnt;
-    }
-    
-    __FORCE_INLINE void setCharCnt(const size_t c_cnt) noexcept {
-        __c_cnt = c_cnt;
-    }
-    
-    __FORCE_INLINE void setBytesCnt(const size_t b_cnt) noexcept {
-        __b_cnt = b_cnt;
-    }
-    
-    //Getter
-    [[nodiscard]] size_t getWordCnt() const noexcept {
-        return __w_cnt;
-    }
-    
-    [[nodiscard]] size_t getLineCnt() const noexcept {
-        return __l_cnt;
-    }
-    
-    [[nodiscard]] size_t getCharCnt() const noexcept {
-        return __c_cnt;
-    }
-    
-    [[nodiscard]] size_t getBytesCnt() const noexcept {
-        return __b_cnt;
-    }
+
+    /**
+    * @brief Returns the size of the mapped data.
+    * @return size_t Size in bytes.
+    */
+    [[nodiscard]] __FORCE_INLINE size_t size() const noexcept { return size_; }
+
+    /**
+    * @brief Returns the filename associated with the mapped file.
+    * @return std::string Copy of the filename.
+    */
+    [[nodiscard]] __FORCE_INLINE std::string filename() const noexcept { return filename_; }
+
+    __FORCE_INLINE void setWordCnt(size_t w_cnt) noexcept { __w_cnt = w_cnt; }
+    __FORCE_INLINE void setLineCnt(size_t l_cnt) noexcept { __l_cnt = l_cnt; }
+    __FORCE_INLINE void setCharCnt(size_t c_cnt) noexcept { __c_cnt = c_cnt; }
+    __FORCE_INLINE void setBytesCnt(size_t b_cnt) noexcept { __b_cnt = b_cnt; }
+
+    [[nodiscard]] size_t getWordCnt() const noexcept { return __w_cnt; }
+    [[nodiscard]] size_t getLineCnt() const noexcept { return __l_cnt; }
+    [[nodiscard]] size_t getCharCnt() const noexcept { return __c_cnt; }
+    [[nodiscard]] size_t getBytesCnt() const noexcept { return __b_cnt; }
 };
 }
 
@@ -1540,7 +1798,23 @@ template <class BitChar, class Translation>
 class __wc_internal_class {
 
   public:
-    // Fixed Instance() method - replace lines 1434-1487
+   /**
+    * @brief Returns a singleton instance of `__wc_internal_class`.
+    *
+    * Provides thread-safe initialization of the singleton using one of
+    * several strategies depending on compilation flags:
+    * - `std::call_once`  
+    * - `std::atomic` with double-checked locking  
+    * - Meyers’ singleton (static local variable)
+    *
+    * @tparam BitChar Character type used in the internal class.
+    * @tparam Translation Translation/mapping type used internally.
+    *
+    * @return Pointer to the singleton instance.
+    *
+    * @note The implementation ensures only one instance is created, even
+    *       in multi-threaded contexts. The returned pointer must not be deleted.
+    */ 
     static __wc_internal_class<BitChar, Translation> *Instance() {
     #ifdef __wc_lib_use_std_call_once
     #define __wc_lib_use_res_flag
@@ -1559,6 +1833,8 @@ class __wc_internal_class {
         static std::atomic<__wc_internal_class<BitChar, Translation> *> instance{nullptr};
         
         // Double-checked locking with proper memory ordering
+        // to avoid race condition with the object instance when 
+        // using multithreaded wc. 
         auto *mem = instance.load(std::memory_order_acquire);
         
         if (mem == nullptr) {
@@ -1572,16 +1848,16 @@ class __wc_internal_class {
 
         return mem;
 
-    // The simplest and SAFEST implementation - recommended
+    // The simplest and SAFEST implementation, not used here
     #elif defined(___wc_lib_use_meyer)
         static __wc_internal_class<BitChar, Translation> instance;
-        return &instance;  // FIX: Return pointer, not value
+        return &instance;
     #endif // __wc_lib_use_std_call_once
     }
     
 
     // Initializing private members argc and argv.
-    // Normally, argv is a filename.
+    // Normally, argv is a vector of flags and filename.
     void init(int ___argc, const char **___argv) {
         this->argc = ___argc;
         
@@ -1612,7 +1888,21 @@ class __wc_internal_class {
 #if defined(_MSVC)
     #pragma region __WC_CHAR_IMPL
 #endif // _MSVC
-    // Maybe great if we use std::variant<>
+   
+    /**
+    * @brief Returns the size (in bytes/characters) of a file.
+    *
+    * Depending on the platform, uses platform-specific methods:
+    * - Linux: `std::filesystem::file_size`  
+    * - Windows: `GetFileSizeEx` via WinAPI  
+    * - Fallback: Counts characters manually using `ifstream`.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t File size in bytes, or `-1` if an error occurs.
+    *
+    * @note On Windows, this is a partial implementation; future updates may improve handling.
+    */
     size_t __wc_char_0(Translation translation = std::identity{}, size_t f_idx = 0) {
 #ifdef __linux__
         // Just some fstat tricks for optimizations
@@ -1662,9 +1952,18 @@ class __wc_internal_class {
 #elif defined(_MSVC)
     __force_inline
 #endif // ___GNUC__
-    // Very simple and blazingly fast trick
-    // Just fstat() system call.
-    // Works with -c
+    
+    /**
+    * @brief Returns the size in bytes of a mapped file.
+    *
+    * Uses the pre-mapped file size directly, making it extremely fast.
+    * Suitable for counting bytes (e.g., `-c` option). Returns 0 if the
+    * file is invalid or the mapped file array is empty.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to query (default: 0).
+    * @return size_t File size in bytes, or 0 if invalid.
+    */
     size_t __wc_char_1(Translation translation = std::identity{}, size_t f_idx = 0) {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
             return 0;
@@ -1677,8 +1976,19 @@ class __wc_internal_class {
 #elif defined(_MSVC)
     __force_inline
 #endif // ___GNUC__
-    // Another test
-    // This one use multithreading.
+     /**
+    * @brief Counts characters in a file using multithreading.
+    *
+    * Reads the entire file into memory and splits it into chunks processed
+    * by multiple threads. Applies an optional translation/functor to each
+    * character during counting.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @return size_t Total count of characters satisfying the translation.
+    *
+    * @note Number of threads is fixed at 12; optimal performance may vary
+    *       depending on CPU architecture and file size.
+    */
     size_t __wc_char_2(Translation translation = std::identity{}) {
         // Should be architecture dependent.
         // Have to check the CPU caracteristics, because too many
@@ -1728,8 +2038,18 @@ class __wc_internal_class {
 #if defined(_MSVC)
     #pragma region __WC_LINE_IMPL
 #endif // _MSVC
-    // Count line.
-    // Linear implementation, not really the good one.
+
+    /**
+    * @brief Counts the number of lines in a file.
+    *
+    * Reads the entire file into memory and counts occurrences of the newline
+    * character (`'\n'`). Linear implementation, not optimized for large files.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @return size_t Total number of lines in the file.
+    *
+    * @note This method is simple but may be slow for very large files.
+    */
     size_t __wc_line_0(Translation translation = std::identity{}) {
         size_t __l_count {};
         std::ifstream file(this->argv[1], std::ios::binary | std::ios::ate);
@@ -1749,6 +2069,21 @@ class __wc_internal_class {
     [[gnu::target("avx512f")]]
     // Using AVX512
     // Slightly better (Use inline assembly)
+
+    /**
+    * @brief Counts lines in a mapped file using AVX512 SIMD instructions.
+    *
+    * Processes 64 bytes at a time, comparing each byte to `'\n'` using
+    * `_mm512_cmpeq_epi8_mask` and counting set bits. Falls back to scalar
+    * counting for the remaining bytes. Extremely fast for large files.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of newline characters in the file.
+    *
+    * @note Requires CPU with AVX512F support. Returns 0 if the mapped file
+    *       is invalid or empty.
+    */
     __FORCE_INLINE
     size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
@@ -1763,15 +2098,18 @@ class __wc_internal_class {
         // If a newline is found on the n-th bits,
         // it is switched to one, else every non newline bits is
         // set to 0. That's what the function _mm512_cmpeq_epi8_mask() does.
+
         while (LIKELY(ptr + 64 <= end)) {
             __builtin_prefetch(ptr + 128, 0, 0);
             __m512i __chk = _mm512_loadu_si512(reinterpret_cast<const __m512i*> (ptr));
             __mmask64 __m = _mm512_cmpeq_epi8_mask(__chk, newline);
+            
             // Count the number of set bits (population count)
             // for data type unsigned long long
             __l_count += __builtin_popcountll(__m);
             ptr += 64;
         }
+
         // Handle remainder (Because
         // every input is not forcefully with 0 mod 64.
         while (LIKELY(ptr < end)) {
@@ -1781,6 +2119,20 @@ class __wc_internal_class {
     }
     
 #elif defined(__AVX2__)
+     /**
+    * @brief Counts lines in a mapped file using AVX2 SIMD instructions.
+    *
+    * Processes 32 bytes at a time, comparing each byte to `'\n'` using
+    * `_mm256_cmpeq_epi8` and `_mm256_movemask_epi8`, then counts set bits
+    * with `std::popcount`. Remaining bytes are counted with a scalar loop.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of newline characters in the file, 0 if
+    *         the mapped file is empty or invalid.
+    *
+    * @note Requires CPU with AVX2 support.
+    */ 
     [[gnu::target("avx2")]]
     __FORCE_INLINE
     size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
@@ -1795,6 +2147,7 @@ class __wc_internal_class {
         const __m256i newline = _mm256_set1_epi8('\n');
         size_t simd_iterations = 0;
         size_t simd_newlines = 0;
+
         // Same logic as with __AVX512F__
         // Just different instruction set
         // More high level and understandable
@@ -1804,12 +2157,14 @@ class __wc_internal_class {
             __m256i __cmp = _mm256_cmpeq_epi8(__chk, newline);
             int __m = _mm256_movemask_epi8(__cmp);
             int count = std::popcount(static_cast<uint32_t> (__m));
+
             __l_count += count;
             simd_newlines += count;
             simd_iterations++;
             ptr += 32;
         }
 
+        // Handle remainder 
         size_t rem = 0;
         while (LIKELY(ptr < end)) {
             rem += (*ptr++ == '\n');
@@ -1822,6 +2177,21 @@ class __wc_internal_class {
 #elif defined(__SSE2__)
     //  SSE is the newest instruction set for
     //  x86-64 CPU.
+
+    /**
+    * @brief Counts lines in a mapped file using SSE2 SIMD instructions.
+    *
+    * Processes 16 bytes at a time, comparing each byte to `'\n'` using
+    * `_mm_cmpeq_epi8` and `_mm_movemask_epi8`, then counts set bits with
+    * `std::popcount`. Remaining bytes are counted with a scalar loop.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of newline characters in the file, or 0 if
+    *         the mapped file is empty or invalid.
+    *
+    * @note Requires CPU with SSE2 support.
+    */
     [[gnu::target("sse2")]]
     __FORCE_INLINE
     size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
@@ -1852,6 +2222,20 @@ class __wc_internal_class {
     }
     
 #else // Fallback to a scalar implementation 
+    
+    /**
+    * @brief Counts lines in a mapped file using loop unrolling.
+    *
+    * Processes 32 bytes at a time with manual unrolling to count newline
+    * characters (`'\n'`) efficiently, then handles any remaining bytes
+    * with a scalar loop. This is a fast, portable alternative to SIMD.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of newline characters in the file.
+    *
+    * @note Optimized for large files; works on all architectures.
+    */
     __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity {}, size_t f_idx = 0)
     noexcept {
         size_t __l_count {};
@@ -1901,6 +2285,20 @@ class __wc_internal_class {
     
     // Dummy function, will break on very large file
     // theorically.
+
+    /**
+    * @brief Counts words in a mapped file using a linear scan.
+    *
+    * Iterates over the file data as a string view, detecting words separated
+    * by whitespace characters (`' '`, `'\r'`, `'\n'`, `'\t'`).  
+    * Simple, portable, but not SIMD-optimized.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of words in the file.
+    *
+    * @note Linear implementation; may be slower for very large files.
+    */
     size_t __wc_word_0(Translation translation = std::identity{}, size_t f_idx = 0) {
         size_t __w_count {}, pos = 0;
         auto __data = mapped_file[f_idx].as_span();
@@ -1926,6 +2324,20 @@ class __wc_internal_class {
 #endif
     
 #ifdef __AVX512F__
+    /**
+    * @brief Counts UTF-8 characters in a mapped file using AVX512F SIMD.
+    *
+    * Processes 64 bytes at a time, detecting UTF-8 character starts by 
+    * identifying non-continuation bytes (bytes not matching 10xxxxxx).  
+    * Remaining bytes are counted with a scalar loop.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of UTF-8 characters in the file, 0 if
+    *         the mapped file is empty or invalid.
+    *
+    * @note Requires CPU with AVX512F support.
+    */
     [[gnu::target("avx512f")]]
     __FORCE_INLINE
     size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
@@ -1945,10 +2357,13 @@ class __wc_internal_class {
         while (LIKELY(ptr + 64 <= end)) {
             __builtin_prefetch(ptr + 128, 0, 0);
             __m512i chunk = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(ptr));
+            
             // Mask to get top 2 bits of each byte
             __m512i masked = _mm512_and_si512(chunk, continuation_mask);
+            
             // Compare with continuation pattern (10xxxxxx)
             __mmask64 is_continuation = _mm512_cmpeq_epi8_mask(masked, continuation_pattern);
+            
             // Count non-continuation bytes (these are character starts)
             char_count += 64 - __builtin_popcountll(is_continuation);
             ptr += 64;
@@ -1965,6 +2380,19 @@ class __wc_internal_class {
     
     
 #elif defined(__AVX2__)
+    /**
+    * @brief Counts UTF-8 characters in a mapped file using AVX2 SIMD.
+    *
+    * Processes 32 bytes at a time, detecting UTF-8 character starts by
+    * identifying non-continuation bytes (bytes not in 0x80–0xBF range).  
+    * Remaining bytes are counted using a scalar loop.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of UTF-8 characters, 0 if file is empty/invalid.
+    *
+    * @note Requires CPU with AVX2 support.
+    */
     [[gnu::target("avx2")]]
     __FORCE_INLINE
     size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
@@ -1976,6 +2404,7 @@ class __wc_internal_class {
         const char *ptr = __data.data();
         const char *end = ptr + __data.size();
         size_t char_count = 0;
+        
         // UTF-8 continuation bytes start with 10xxxxxx (0x80-0xBF)
         // We count all bytes that are NOT continuation bytes
         const __m256i continuation_mask = _mm256_set1_epi8(0xC0); // 11000000
@@ -1983,12 +2412,16 @@ class __wc_internal_class {
 
         while (LIKELY(ptr + 32 <= end)) {
             __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+            
             // Get top 2 bits: (byte & 11000000)
             __m256i masked = _mm256_and_si256(chunk, continuation_mask);
+            
             // Compare with 10000000 (continuation bytes)
             __m256i is_continuation = _mm256_cmpeq_epi8(masked, continuation_pattern);
+            
             // Get mask of continuation bytes
             int continuation_bits = _mm256_movemask_epi8(is_continuation);
+            
             // Count non-continuation bytes (characters)
             // 32 total bytes - number of continuation bytes
             char_count += 32 - __builtin_popcount(static_cast<uint32_t>(continuation_bits));
@@ -2005,6 +2438,19 @@ class __wc_internal_class {
     }
     
 #elif defined(__SSE2__)
+    /**
+    * @brief Counts UTF-8 characters in a mapped file using SSE2 SIMD.
+    *
+    * Processes 16 bytes at a time, detecting UTF-8 character starts by
+    * identifying non-continuation bytes (bytes not in 0x80–0xBF range).  
+    * Remaining bytes are counted using a scalar loop.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of UTF-8 characters, 0 if file is empty or invalid.
+    *
+    * @note Requires CPU with SSE2 support.
+    */
     [[gnu::target("sse2")]]
     __FORCE_INLINE
     size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
@@ -2036,8 +2482,21 @@ class __wc_internal_class {
         return char_count;
     }
     
-#else
-    // Scalar fallback
+#else // Scalar fallback
+    /**
+    * @brief Counts UTF-8 characters in a mapped file using unrolled loops.
+    *
+    * Processes 32 bytes at a time, treating any byte that is NOT a UTF-8
+    * continuation byte (0x80–0xBF) as a character start.  
+    * Remainder bytes are handled with a scalar loop.
+    *
+    * @param translation Optional translation/mapping functor (default: identity).
+    * @param f_idx Index of the mapped file to process (default: 0).
+    * @return size_t Total number of UTF-8 characters, 0 if file is empty/invalid.
+    *
+    * @note This is a high-performance branch-unrolled implementation, portable
+    *       across CPUs without SIMD support.
+    */
     __FORCE_INLINE
     size_t __wc_char_m(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
@@ -2085,24 +2544,44 @@ class __wc_internal_class {
 #endif
     
     
-    
+   /**
+    * @brief Returns the total number of words counted.
+    * @return size_t Total words.
+    */
     [[nodiscard]] __FORCE_INLINE size_t getTotalWord() const noexcept {
         return total_word;
     }
-    
+
+    /**
+    * @brief Returns the total number of lines counted.
+    * @return size_t Total lines.
+    */
     [[nodiscard]] __FORCE_INLINE size_t getTotalLine() const noexcept {
         return total_line;
     }
-    
+
+    /**
+    * @brief Returns the total number of characters counted.
+    * @return size_t Total characters.
+    */
     [[nodiscard]] __FORCE_INLINE size_t getTotalChar() const noexcept {
         return total_char;
     }
-    
+
+    /**
+    * @brief Returns the total number of bytes counted.
+    * @return size_t Total bytes.
+    */
     [[nodiscard]] __FORCE_INLINE size_t getTotalBytes() const noexcept {
         return total_bytes;
     }
-    
-    // Last call
+ 
+   /**
+    * @brief Prints the counts (lines, words, characters, bytes) for each mapped file and the total.
+    * 
+    * The output respects column widths for alignment. Only enabled counters
+    * (count_line, count_word, count_char, count_bytes) are printed.
+    */ 
     __FORCE_INLINE void printTotal() const noexcept {
         for (const auto &file : mapped_file) {
             if (count_line) {
@@ -2137,7 +2616,15 @@ class __wc_internal_class {
 #if defined(_MSVC)
     #pragma endregion __WC_WORD_IMPL
 #endif // _MSVC 
-    // Global wrapper for every command line options
+
+    /**
+    * @brief Computes line, word, character, and byte counts for all mapped files.
+    * 
+    * Iterates over each mapped file and updates per-file counts as well as totals.
+    * Column widths (__max_*_width) are updated for aligned printing.
+    * 
+    * @param __local_transform Optional character translation function (default: identity).
+    */
     void wc(Translation __local_transform = std::identity{}) {
         size_t var {};
         __parse_argv();
@@ -2169,7 +2656,16 @@ class __wc_internal_class {
             }
         }
     }
-    
+   
+    /**
+    * @brief Computes line, word, and byte counts in parallel for all mapped files.
+    * 
+    * Each file is processed on a thread pool to calculate counts concurrently.
+    * Per-file counts are updated immediately; totals and column widths are
+    * aggregated after all threads complete.
+    * 
+    * @param __local_transform Optional character translation function (default: identity).
+    */
     void wc_parallel_0(Translation __local_transform = std::identity{}) {
         size_t var{};
         __parse_argv();
@@ -2219,7 +2715,16 @@ class __wc_internal_class {
         }
     }
     
-    
+    /**
+    * @brief Performs word, line, and byte counting in parallel using a thread pool.
+    * 
+    * Each file in `mapped_file` is processed concurrently based on the enabled
+    * count flags (`count_line`, `count_word`, `count_bytes`). After all threads
+    * finish, per-file results are aggregated to update total counts and maximum
+    * column widths.
+    * 
+    * @param __local_transform Optional character translation function (default: identity).
+    */
     void wc_parallel_operations(Translation __local_transform = std::identity{}) {
         __parse_argv();
         auto* pool = tp::__wc_thread_pool::Instance();
@@ -2273,7 +2778,25 @@ class __wc_internal_class {
             }
         }
     }
-    
+   
+    /**
+    * @brief Performs a hybrid parallel word/line/byte/character count across multiple files.
+    * 
+    * This function adapts its strategy depending on the number of files and available threads:
+    * 
+    * - For a single file, it performs sequential counting (no parallelization).
+    * - For multiple files, it uses a thread pool to distribute work across threads,
+    *   processing files in chunks to reduce contention.
+    * 
+    * Each thread maintains a local accumulator (`ThreadLocalAccumulator`) for per-thread totals
+    * and maximum column widths. After all threads complete, the local accumulators are reduced
+    * to compute global totals and widths.
+    * 
+    * The function respects the counting flags (`count_line`, `count_word`, `count_bytes`, `count_char`)
+    * and updates per-file counts in `mapped_file`.
+    * 
+    * @param __local_transform Optional character translation function applied during counting (default: identity).
+    */
     void wc_parallel_hybrid(Translation __local_transform = std::identity{}) {
         // process this->argv and activate each 
         // corresponding flags. 
@@ -2311,6 +2834,7 @@ class __wc_internal_class {
                 total_char = var;
                 __max_char_width = detail::__int_width(var);
             }
+
             return;
         }
 

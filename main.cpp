@@ -18,6 +18,7 @@
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#include <type_traits>
 #endif // _GNU_SOURCE
 
 
@@ -130,13 +131,85 @@ void display_error(LPCTSTR lpszFunction)
 
 
 namespace tp {
-// Default CPU core number is N_CORE
-inline constexpr int N_CORE = 4;
+
+#define BUILD_MAX_CORE 64
+
+// This constexpr template function is used for 
+// logging and type debugging
+template<typename T, typename U> 
+constexpr bool is_decay_equal = std::is_same_v<std::decay_t<T>, U>;
+
+#if defined(__linux) || defined(__linux__) || defined(__gnu_linux__)
+// Tried to define it with constexpr but it didn't work 
+// That's why the type of N_CORE is different from the 
+// declaration. 
+// 
+// Note: A CPU can create more threads than the value returned 
+// by std::thread::hardware_concurrency(), but many threads can considerably 
+// slow down the CPU performance (The CPU is overwhelmed). So we have to moderate 
+// the number of threads a process can generate. On linux systems, the value of 
+// hardware_concurrency() can be obtained using the command : $ nproc --all
+inline unsigned int N_CORE = std::thread::hardware_concurrency();
+
+// It cannot be evaluated in a compile time expression.
+// Unless we take the risk to oversubscribe threads, overallocate buffers and 
+// break scheduling assumptions if the N_CORE of the build machine is 
+// different from the runtime of the target machine. So, runtime detection is 
+// almost always the correct way.  
+// constexpr unsigned int N_CORE = N_CORE;
+
+#elif defined(_WIN32)
+namespace thread {
+size_t hardware_concurrency() { 
+    size_t concurrency = 0; 
+    DWORD length = 0; 
+
+    if (GetLogicalProcessorInformationEx(RelationAll, nullptr, &length) != FALSE) {
+        return concurrency; 
+    }
+
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) { 
+        return concurrency;
+    } 
+
+    using BufferType = std::unique_ptr<void, void(*)(void*)>;
+    BufferType buffer(std::malloc(length, std::free));
+
+    if (!buffer) { 
+        return concurrency; 
+    }
+
+    unsigned char *mem = reinterpret_cast<unsigned char *>(buffer.get());
+    if (GetLogicalProcessorInformationEx(RelationAll, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(mem), &length) == false) { 
+        return concurrency; 
+    }
+
+    for(DWORD i = 0; i < length; ) { 
+        auto *proc = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(mem + i); 
+        if (proc->Relationship == RelationProcessorCore) { 
+            // Some documentation says that this scope can 
+            // be simplified to: 
+            // concurrency++ 
+            //
+            // This part of code is not tested yet
+            for(WORD group = 0; group < proc->Processor.GroupCount; ++group) { 
+                for(KAFFINITY mask = proc->Processor.GroupMask[group].Mask; mask != 0; mask >>=1) {
+                    concurrency += mask & 1;
+                }
+            }
+        }
+
+        i += proc->Size;
+    }
+    
+    return concurrency; 
+}
+
+inline unsigned int _N_CORE = thread::hardware_concurrency(); 
+#endif // __linux__
 
 inline constexpr int BUFFER_SIZE = 128; 
-
-// Cache line size for alignment
-inline constexpr size_t CACHE_LINE_SIZE = 64;
+inline constexpr std::size_t CACHE_LINE_SIZE = 64;
 
 // Small buffer optimization for task storage
 template<size_t BufferSize = BUFFER_SIZE>
@@ -156,6 +229,9 @@ class task_wrapper {
         
         static_assert(sizeof(DecayF) <= BufferSize, "Task too large for buffer");
         static_assert(alignof(DecayF) <= alignof(std::max_align_t), "Task alignment too large");
+        
+        static_assert(std::is_invocable_v<F&>, "Task must be callable"); 
+        static_assert(std::is_invocable_r_v<void, F&>, "Task must be callable with no args"); 
         
         new (buffer) DecayF(std::forward<F> (f));
         invoke_fn = [](void* p) {
@@ -255,15 +331,14 @@ struct alignas(CACHE_LINE_SIZE) aligned_task_queue {
 };
 
 // Optimized thread pool with work stealing
-template <size_t __n_core = N_CORE>
 class __wc_thread_pool {
   public:
-    __wc_thread_pool(const __wc_thread_pool<__n_core> &) = delete;
-    __wc_thread_pool &operator= (const __wc_thread_pool<__n_core> &) = delete;
+    __wc_thread_pool(const __wc_thread_pool &) = delete;
+    __wc_thread_pool &operator= (const __wc_thread_pool &) = delete;
     
-    static __wc_thread_pool<__n_core> *Instance() {
+    static __wc_thread_pool *Instance() {
         std::call_once(__init_flag, []() {
-            __instance.reset(new __wc_thread_pool<__n_core>());
+            __instance.reset(new __wc_thread_pool());
         });
 
         return __instance.get();
@@ -289,7 +364,7 @@ class __wc_thread_pool {
             }
 
             // Round-robin task distribution to reduce contention
-            size_t target_queue = __next_queue.fetch_add(1, std::memory_order_relaxed) % __n_core;
+            size_t target_queue = __next_queue.fetch_add(1, std::memory_order_relaxed) % N_CORE;
             {
                 std::unique_lock<std::mutex> queue_lock(__queues[target_queue].mutex);
                 __queues[target_queue].tasks.emplace([task]() {
@@ -312,7 +387,7 @@ class __wc_thread_pool {
             if (__stop.load(std::memory_order_acquire)) {
                 throw std::runtime_error("Cannot enqueue to stopped thread pool");
             }
-            size_t target_queue = __next_queue.fetch_add(1, std::memory_order_relaxed) % __n_core;
+            size_t target_queue = __next_queue.fetch_add(1, std::memory_order_relaxed) % N_CORE;
             {
                 std::unique_lock<std::mutex> queue_lock(__queues[target_queue].mutex);
                 __queues[target_queue].tasks.emplace([task = std::move(task)]() {
@@ -340,7 +415,7 @@ class __wc_thread_pool {
             }
 
             for (auto it = begin; it != end; ++it) {
-                size_t target_queue = __next_queue.fetch_add(1, std::memory_order_relaxed) % __n_core;
+                size_t target_queue = __next_queue.fetch_add(1, std::memory_order_relaxed) % N_CORE;
                 {
                     std::unique_lock<std::mutex> queue_lock(__queues[target_queue].mutex);
                     __queues[target_queue].tasks.emplace([task = *it]() {
@@ -393,7 +468,7 @@ class __wc_thread_pool {
     }
     
     size_t thread_count() const {
-        return __n_core;
+        return N_CORE;
     }
     
     size_t active_tasks() const {
@@ -409,10 +484,10 @@ class __wc_thread_pool {
     
   private:
     __wc_thread_pool()
-        : __queues(__n_core) {
+        : __queues(N_CORE) {
         __cpu_core = std::thread::hardware_concurrency();
-        __threads.reserve(__n_core);
-        for (size_t i = 0; i < __n_core; ++i) {
+        __threads.reserve(N_CORE);
+        for (size_t i = 0; i < N_CORE; ++i) {
             __threads.emplace_back([this, i]() {
                 worker_thread(i);
             });
@@ -443,8 +518,8 @@ class __wc_thread_pool {
 
             // If own queue is empty, try work stealing
             if (!found_task) {
-                for (size_t i = 1; i <= __n_core; ++i) {
-                    size_t steal_from = (thread_id + i) % __n_core;
+                for (size_t i = 1; i <= N_CORE; ++i) {
+                    size_t steal_from = (thread_id + i) % N_CORE;
                     std::unique_lock<std::mutex> lock(__queues[steal_from].mutex, std::try_to_lock);
                     
                     if (lock.owns_lock() && !__queues[steal_from].tasks.empty()) {
@@ -491,7 +566,7 @@ class __wc_thread_pool {
         }
     }
     
-    static std::unique_ptr<__wc_thread_pool<__n_core>> __instance;
+    static std::unique_ptr<__wc_thread_pool> __instance;
     static std::once_flag __init_flag;
     
     unsigned int __cpu_core;
@@ -511,14 +586,12 @@ class __wc_thread_pool {
 };
 
 // Static member initialization
-template <size_t __n_core>
-std::unique_ptr<__wc_thread_pool<__n_core>> __wc_thread_pool<__n_core>::__instance;
+std::unique_ptr<__wc_thread_pool> __wc_thread_pool::__instance;
 
-template <size_t __n_core>
-std::once_flag __wc_thread_pool<__n_core>::__init_flag;
+std::once_flag __wc_thread_pool::__init_flag;
 
 // Convenience alias
-using thread_pool = __wc_thread_pool<>;
+using thread_pool = __wc_thread_pool;
 
 } // namespace tp
 
@@ -1358,41 +1431,25 @@ template <class BitChar, class Translation>
 class __wc_internal_class {
 
   public:
+    // Fixed Instance() method - replace lines 1434-1487
     static __wc_internal_class<BitChar, Translation> *Instance() {
-#ifdef __wc_lib_use_std_call_once
-#define __wc_lib_use_res_flag
+    #ifdef __wc_lib_use_std_call_once
+    #define __wc_lib_use_res_flag
         std::once_flag flag = wc_flag;
         std::call_once(flag, []() {
-#if defined(__wc_lib_has_default_value)
+    #if defined(__wc_lib_has_default_value)
             instance = new __wc_internal_class();
-#else
+    #else
             instance = new __wc_internal_class("", std::identity {});
-#endif // __wc_lib_has_default_value
+    #endif // __wc_lib_has_default_value
         });
 
         return instance;
-#elif defined(__wc_lib_use_std_atomic)
-        // Destroy the private member __wc_internal_class* instance;
-        // Later, can cause multiple compilation issues if not
-        // handled correctly.
-        //
-        // Needs C++17 or later for std::optional or std::variant
-#if defined(__cplusplus) && __cplusplus >= 201703L
-#if defined(__wc_lib_private_instance)
-        try {
-            if (__instance != std::nullopt) {
-                __instance->reset();
-            };
-        }
-        catch (std::bad_optional_access &__opt_access) {
-            std::cout << __opt_access.what() << '\n';
-        };
-#endif // __wc_lib_private_instance
-        static std::atomic<__wc_internal_class<BitChar, Translation> *> instance;
-#else
-#error "Compile with C++17 or later"
-#endif
-        // Here load() return a pointer to a __wc_internal_class.
+    #elif defined(__wc_lib_use_std_atomic)
+        // FIX: Use nullptr initialization and remove the problematic optional reset
+        static std::atomic<__wc_internal_class<BitChar, Translation> *> instance{nullptr};
+        
+        // Double-checked locking with proper memory ordering
         auto *mem = instance.load(std::memory_order_acquire);
         
         if (mem == nullptr) {
@@ -1406,13 +1463,14 @@ class __wc_internal_class {
 
         return mem;
 
-// The simplest implementation
-#elif defined(___wc_lib_use_meyer)
+    // The simplest and SAFEST implementation - recommended
+    #elif defined(___wc_lib_use_meyer)
         static __wc_internal_class<BitChar, Translation> instance;
-        return instance;
-#endif // __wc_lib_use_std_call_once
+        return &instance;  // FIX: Return pointer, not value
+    #endif // __wc_lib_use_std_call_once
     }
     
+
     // Initializing private members argc and argv.
     // Normally, argv is a filename.
     void init(int ___argc, const char **___argv) {
@@ -1997,7 +2055,7 @@ class __wc_internal_class {
             if (count_char) {
                 var = __wc_char_m(__local_transform, i);
                 mapped_file[i].setCharCnt(var);
-                __max_char_width = std::max(__max_bytes_width, detail::__int_width(var));
+                __max_char_width = std::max(__max_char_width, detail::__int_width(var));
                 total_char += var;
             }
         }
@@ -2006,7 +2064,7 @@ class __wc_internal_class {
     void wc_parallel_0(Translation __local_transform = std::identity{}) {
         size_t var{};
         __parse_argv();
-        auto* pool = tp::__wc_thread_pool<>::Instance();
+        auto* pool = tp::__wc_thread_pool::Instance();
         std::vector<std::future<void>> futures;
 
         for (size_t i = 0; i < mapped_file.size(); ++i) {
@@ -2055,7 +2113,7 @@ class __wc_internal_class {
     
     void wc_parallel_operations(Translation __local_transform = std::identity{}) {
         __parse_argv();
-        auto* pool = tp::__wc_thread_pool<>::Instance();
+        auto* pool = tp::__wc_thread_pool::Instance();
         std::vector<std::future<void>> futures;
 
         if (count_line) {
@@ -2109,7 +2167,7 @@ class __wc_internal_class {
     
     void wc_parallel_hybrid(Translation __local_transform = std::identity{}) {
         __parse_argv();
-        auto* pool = tp::__wc_thread_pool<>::Instance();
+        auto* pool = tp::__wc_thread_pool::Instance();
         const size_t num_files = mapped_file.size();
         const size_t num_threads = pool->thread_count();
 
@@ -2143,7 +2201,10 @@ class __wc_internal_class {
             return;
         }
 
-        // Per-thread accumulators to minimize atomic contention
+        // Per-thread accumulators to minimize atomic contention. 
+        // Without thread_local, this implementation is a candidate 
+        // for possible data race. Multiple workers may write to same 
+        // accumulator which implies data race / false sharing. 
         struct alignas(64) ThreadLocalAccumulator {
             size_t total_line = 0;
             size_t total_word = 0;
@@ -2158,15 +2219,17 @@ class __wc_internal_class {
         std::vector<ThreadLocalAccumulator> accumulators(num_threads);
         std::vector<std::future<void>> futures;
         futures.reserve(num_files);
+        
         // Determine optimal chunk size for work distribution
         const size_t min_chunk_size = 1;
         const size_t max_chunk_size = 10;
         const size_t chunk_size = std::clamp(
-                                      num_files / (num_threads * 4),
+                                      num_files / num_threads,
                                       min_chunk_size,
                                       max_chunk_size
                                   );
-        // Process files in chunks
+        
+        // Process files in chunks of chunk_size
         for (size_t chunk_start = 0; chunk_start < num_files; chunk_start += chunk_size) {
             size_t chunk_end = std::min(chunk_start + chunk_size, num_files);
             size_t thread_idx = (chunk_start / chunk_size) % num_threads;
@@ -2195,7 +2258,7 @@ class __wc_internal_class {
                     if (count_char) {
                         var = __wc_char_m(__local_transform, i);
                         mapped_file[i].setCharCnt(var);
-                        acc.total_bytes += var;
+                        acc.total_char += var;
                         acc.max_char_width = std::max(acc.max_char_width, detail::__int_width(var));
                     }
                 }
@@ -2219,9 +2282,12 @@ class __wc_internal_class {
             total_line += acc.total_line;
             total_word += acc.total_word;
             total_bytes += acc.total_bytes;
+            total_char += acc.total_char; 
+
             __max_line_width = std::max(__max_line_width, acc.max_line_width);
             __max_word_width = std::max(__max_word_width, acc.max_word_width);
             __max_bytes_width = std::max(__max_bytes_width, acc.max_bytes_width);
+            __max_char_width = std::max(__max_char_width, acc.max_char_width);
         }
     }
     

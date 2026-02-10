@@ -160,6 +160,12 @@ inline unsigned int N_CORE = std::thread::hardware_concurrency();
 
 #elif defined(_WIN32)
 namespace thread {
+
+// Windows systems do not have default hardware_concurrency() 
+// implementation. There are many API and system calls which claim 
+// to return the number of core on the target machine, but their results 
+// are all incoherent. Here is an effort for a correct implementation of 
+// std::thread::hardware_concurrency() for msdos systems.  
 size_t hardware_concurrency() { 
     size_t concurrency = 0; 
     DWORD length = 0; 
@@ -205,13 +211,15 @@ size_t hardware_concurrency() {
     return concurrency; 
 }
 
+// Then we define N_CORE  (The number of core the machine)
 inline unsigned int _N_CORE = thread::hardware_concurrency(); 
+
 #endif // __linux__
 
 inline constexpr int BUFFER_SIZE = 128; 
 inline constexpr std::size_t CACHE_LINE_SIZE = 64;
 
-// Small buffer optimization for task storage
+// Small buffer optimization for task storage and caching
 template<size_t BufferSize = BUFFER_SIZE>
 class task_wrapper {
   private:
@@ -603,13 +611,48 @@ using thread_pool = __wc_thread_pool;
 namespace detail {
 inline constexpr int MAX_OPTIONS = 32;
 
-// SIMD-optimized FNV-1a hash for longer strings
+/**
+ * @brief Computes a 32-bit FNV-1a hash for a byte sequence.
+ *
+ * Implements the Fowler–Noll–Vo hash function (FNV-1a variant) over the
+ * bytes contained in the given `std::string_view`. The implementation
+ * uses manual loop unrolling to process four bytes per iteration in order
+ * to reduce loop overhead and improve instruction-level parallelism on
+ * modern CPUs. Remaining bytes are processed sequentially.
+ *
+ * The function is `constexpr`, enabling compile-time hashing when invoked
+ * with constant expressions.
+ *
+ * @param __s The input string view representing the byte sequence to hash.
+ *            The data is treated as raw bytes; no encoding assumptions are
+ *            enforced beyond byte-wise processing.
+ *
+ * @return uint32_t The resulting 32-bit FNV-1a hash value.
+ *
+ * @pre
+ * - `__s.data()` must reference a valid contiguous memory region of
+ *   at least `__s.size()` bytes.
+ *
+ * @note
+ * - Time complexity is O(n), where n is `__s.size()`.
+ * - Deterministic across platforms given identical byte sequences.
+ * - Uses standard FNV offset basis (2166136261u) and FNV prime (16777619u).
+ * - Manual unrolling improves throughput mainly for medium to large inputs.
+ *
+ * @warning
+ * - Not suitable for cryptographic purposes.
+ * - Collisions are possible due to the 32-bit output size.
+ *
+ * @exception noexcept Guaranteed not to throw exceptions.
+ */
 constexpr uint32_t hash_fnv1a(std::string_view __s) noexcept {
     uint32_t hash = 2166136261u;
     const char *ptr = __s.data();
     size_t len = __s.size();
 
-    // Process 4 bytes at a time for better performance
+    // Process 4 bytes at a time for better performance, 
+    // It can be increased but doesn't affect too much the 
+    // runtime of the function. 
     while (len >= 4) {
         hash ^= static_cast<uint8_t>(ptr[0]);
         hash *= 16777619u;
@@ -632,7 +675,44 @@ constexpr uint32_t hash_fnv1a(std::string_view __s) noexcept {
     return hash;
 }
 
-// Branchless, unrolled fast atoi
+/**
+ * @brief Fast branch-minimized ASCII to integer conversion.
+ *
+ * Converts a null-terminated C-string representing a signed decimal integer
+ * into an `int`. The implementation is optimized for performance using
+ * branchless sign handling and manual loop unrolling to reduce control-flow
+ * overhead in the common case of short numeric sequences.
+ *
+ * Parsing stops at the first non-digit character. Only base-10 digits are
+ * supported. No locale handling, whitespace skipping, or overflow checks
+ * are performed.
+ *
+ * @param __s Pointer to a null-terminated character sequence containing an
+ *            optional leading '+' or '-' followed by decimal digits.
+ *
+ * @return int The parsed integer value with sign applied.
+ *
+ * @pre
+ * - `__s` must be a valid, readable, null-terminated string.
+ * - Input must represent a value within the range of `int`; otherwise
+ *   signed overflow results in undefined behavior.
+ *
+ * @post
+ * - The input pointer itself is not modified externally.
+ * - Parsing stops at the first non-decimal character.
+ *
+ * @note
+ * - Time complexity is O(n), where n is the number of processed digits.
+ * - Designed for hot paths where input is well-formed and short.
+ * - Not a drop-in replacement for `std::atoi` or `std::from_chars`.
+ *
+ * @warning
+ * - No overflow detection.
+ * - No validation of empty strings or non-numeric input beyond digit checks.
+ * - Behavior is undefined if `__s` is null.
+ *
+ * @exception noexcept Guaranteed not to throw exceptions.
+ */
 constexpr int __fast_atoi(const char* __s) noexcept {
     int res = 0;
     int sign = 1;
@@ -666,14 +746,43 @@ constexpr int __fast_atoi(const char* __s) noexcept {
     return res * sign;
 }
 
-// Bit-manipulation based integer width (no floating point!)
+/**
+ * @brief Computes the number of decimal digits required to represent an integer.
+ *
+ * Returns the base-10 width (digit count) of the given unsigned integer
+ * without performing division or logarithmic operations. The implementation
+ * uses a sequence of comparisons against powers of 10, which is typically
+ * faster than `log10` or iterative division for small and medium-sized
+ * integers in hot paths.
+ *
+ * The function is intended to be aggressively inlined (`__FORCE_INLINE`)
+ * and is suitable for performance-critical formatting or serialization
+ * routines.
+ *
+ * @param __n The non-negative integer whose decimal digit width is computed.
+ *
+ * @return size_t The number of decimal digits required to represent `__n`.
+ *                Returns 1 when `__n == 0`.
+ *
+ * @note
+ * - Time complexity is O(1) with a bounded number of comparisons.
+ * - Covers the full range of 64-bit unsigned values (up to 20 digits).
+ * - Avoids floating-point operations and division instructions.
+ *
+ * @warning
+ * - Assumes `size_t` can represent values up to at least 10^19 if used
+ *   on 64-bit platforms; behavior remains correct on smaller platforms
+ *   but upper branches may be unreachable.
+ *
+ * @exception noexcept Guaranteed not to throw exceptions.
+ */
 __FORCE_INLINE size_t __int_width(size_t __n) noexcept {
     if (__n == 0) {
         return 1;
     }
 
     // Use binary search on powers of 10
-    // Faster than log10 for small numbers
+    // It's faster than log10 for small numbers.
     if (__n < 10) {
         return 1;
     }
@@ -2166,12 +2275,16 @@ class __wc_internal_class {
     }
     
     void wc_parallel_hybrid(Translation __local_transform = std::identity{}) {
+        // process this->argv and activate each 
+        // corresponding flags. 
         __parse_argv();
+
         auto* pool = tp::__wc_thread_pool::Instance();
         const size_t num_files = mapped_file.size();
         const size_t num_threads = pool->thread_count();
 
-        // Handle single file case - no parallelization needed at file level
+        // Handle single file case, no parallelization needed
+        // (Can be a performance skyrocket)
         if (num_files == 1) {
             size_t var{};
             if (count_line) {
@@ -2202,15 +2315,24 @@ class __wc_internal_class {
         }
 
         // Per-thread accumulators to minimize atomic contention. 
-        // Without thread_local, this implementation is a candidate 
-        // for possible data race. Multiple workers may write to same 
-        // accumulator which implies data race / false sharing. 
+        // Without thread_local, this implementation can be a candidate 
+        // for possible data race but it was not proved yet. 
+        // Multiple workers may write to same accumulator 
+        // which implies data race / false sharing.
+        // 
+        // Even though total_XXXX are already declared as private members of 
+        // __wc_internal_class, this struct keeps track of result from workers. 
+        // At the end, its content will be affected to the corresponding value.  
         struct alignas(64) ThreadLocalAccumulator {
-            size_t total_line = 0;
-            size_t total_word = 0;
-            size_t total_bytes = 0;
-            size_t total_char = 0;
-            size_t max_line_width = 0;
+            size_t total_line = 0;                  // total number of line
+            size_t total_word = 0;                  // total number of word
+            size_t total_bytes = 0;                 // total number of bytes 
+            size_t total_char = 0;                  // total number of char
+            
+            // To have better formatting, we have to 
+            // keep track of the max width for each result. 
+            // then pass that with setw in std::cout streams. 
+            size_t max_line_width = 0;              
             size_t max_word_width = 0;
             size_t max_bytes_width = 0;
             size_t max_char_width = 0;
@@ -2269,7 +2391,9 @@ class __wc_internal_class {
             future.get();
         }
 
-        // Single-threaded reduction of results
+        // When all tasks is finished, which means 
+        // accumulator has already the final value, we reduce 
+        // the runtime to a single-threaded one. 
         total_line = 0;
         total_word = 0;
         total_bytes = 0;

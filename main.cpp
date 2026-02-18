@@ -3106,14 +3106,6 @@ wc_class_instance =
 
 #define __cpp_lib_using_global_var
 
-
-// Imagine if we could implement a {w,l} counter on compressed object.
-// The same object, but with fewer lines.
-//
-// We have to study though if the time compressing the object + time counting
-// remaining lines <= time counting full line ?
-//
-// Under which assumptions this last statement is true ?
 int main(int argc, const char **argv) {
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);

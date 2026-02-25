@@ -57,18 +57,13 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
-    
+
+#else 
+# error "POSIX version is inferior than 200809L"
 #endif // _POSIX_VERSION
 
 // For __wc_internal_class implementation
 #define __wc_lib_use_std_atomic
-
-#if __cplusplus >= 202002L
-#define __cpp_lib_use_likely
-    // Can use C++20 [[likely]] for branch
-    // prediction.
-    
-#endif // __cplusplus
  
 // Exit code 
 #define WC_EXIT_CODE_FAILURE      -1 
@@ -1889,64 +1884,6 @@ class __wc_internal_class {
     #pragma region __WC_CHAR_IMPL
 #endif // _MSVC
    
-    /**
-    * @brief Returns the size (in bytes/characters) of a file.
-    *
-    * Depending on the platform, uses platform-specific methods:
-    * - Linux: `std::filesystem::file_size`  
-    * - Windows: `GetFileSizeEx` via WinAPI  
-    * - Fallback: Counts characters manually using `ifstream`.
-    *
-    * @param translation Optional translation/mapping functor (default: identity).
-    * @param f_idx Index of the mapped file to process (default: 0).
-    * @return size_t File size in bytes, or `-1` if an error occurs.
-    *
-    * @note On Windows, this is a partial implementation; future updates may improve handling.
-    */
-    size_t __wc_char_0(Translation translation = std::identity{}, size_t f_idx = 0) {
-#ifdef __linux__
-        // Just some fstat tricks for optimizations
-        try {
-            std::uintmax_t ____sz = std::filesystem::file_size(this->argv[1]);
-            return ____sz;
-        }
-        catch (std::filesystem::filesystem_error &e) {
-            std::cerr << e.what() << std::endl;
-        }
-        return size_t (-1);
-#elif defined(_WIN32)
-        // For future perspective.
-        // Not fully implemented in this version.
-        // Windows API (and programming) is slightly different,
-        // we have to use GetFileSizeEx()
-        HANDLE hFile = CreateFileA(mapped_file[f_idx].filename().c_str(),
-                                   GENERIC_READ,
-                                   FILE_SHARE_READ,
-                                   NULL,
-                                   OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL,
-                                   NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER __sz;
-            if (GetFileSizeEx(hFile, &__sz)) {
-                CloseHandle(hFile);
-                return static_cast<size_t> (__sz.QuadPart);
-            }
-            CloseHandle(hFile);
-        }
-#else
-        // POSIX standard API
-        // If read is not available with the OS API.
-        size_t __c_count {};
-        std::ifstream file(this->argv[1]);
-        for (const char &c : std::string(std::istreambuf_iterator<char> (file),
-                                         std::istreambuf_iterator<char>())) {
-            __c_count++;
-        }
-        return __c_count;
-#endif // _PLATFORM_SPECIFIC
-    }
-    
 #if defined(__GNUC__) || defined(__clang__)
     __attribute__((always_inline, hot))
 #elif defined(_MSVC)
@@ -1964,7 +1901,7 @@ class __wc_internal_class {
     * @param f_idx Index of the mapped file to query (default: 0).
     * @return size_t File size in bytes, or 0 if invalid.
     */
-    size_t __wc_char_1(Translation translation = std::identity{}, size_t f_idx = 0) {
+    size_t __wc_char_c(Translation translation = std::identity{}, size_t f_idx = 0) {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
             return 0;
         }
@@ -1976,54 +1913,6 @@ class __wc_internal_class {
 #elif defined(_MSVC)
     __force_inline
 #endif // ___GNUC__
-     /**
-    * @brief Counts characters in a file using multithreading.
-    *
-    * Reads the entire file into memory and splits it into chunks processed
-    * by multiple threads. Applies an optional translation/functor to each
-    * character during counting.
-    *
-    * @param translation Optional translation/mapping functor (default: identity).
-    * @return size_t Total count of characters satisfying the translation.
-    *
-    * @note Number of threads is fixed at 12; optimal performance may vary
-    *       depending on CPU architecture and file size.
-    */
-    size_t __wc_char_2(Translation translation = std::identity{}) {
-        // Should be architecture dependent.
-        // Have to check the CPU caracteristics, because too many
-        // threads can be worse than single thread sometimes (on some architecure)
-        constexpr int num_threads = 12;
-        
-        std::ifstream file(this->argv[1], std::ios::binary | std::ios::ate);
-        std::streamsize size = file.tellg();
-        std::vector<char> buffer(size);
-        
-        file.seekg(0, std::ios::beg);
-        file.read(buffer.data(), size);
-        
-        size_t chunk_size = size / num_threads;
-        std::vector<std::thread> threads;
-        std::vector<size_t> counts(num_threads, 0);
-        
-        for (size_t i = 0; i < num_threads; ++i) {
-            size_t start = i * chunk_size;
-            size_t end = (i == num_threads - 1) ? size : (i + 1) * chunk_size;
-            
-            threads.emplace_back([&buffer, start, end, &counts, i, translation]() {
-                //counts[i] = end - start;
-                // Or with transformation:
-                counts[i] = std::count_if(buffer.begin() + start, buffer.begin() + end,
-                                        [&](char c) { return translation(c); });
-            });
-        }
-
-        for (auto& t : threads) {
-            t.join();
-        }
-
-        return std::accumulate(counts.begin(), counts.end(), size_t (0));
-    }
     
 #if defined(_MSVC)
     #pragma endregion __WC_CHAR_IMPL
@@ -2038,32 +1927,6 @@ class __wc_internal_class {
 #if defined(_MSVC)
     #pragma region __WC_LINE_IMPL
 #endif // _MSVC
-
-    /**
-    * @brief Counts the number of lines in a file.
-    *
-    * Reads the entire file into memory and counts occurrences of the newline
-    * character (`'\n'`). Linear implementation, not optimized for large files.
-    *
-    * @param translation Optional translation/mapping functor (default: identity).
-    * @return size_t Total number of lines in the file.
-    *
-    * @note This method is simple but may be slow for very large files.
-    */
-    size_t __wc_line_0(Translation translation = std::identity{}) {
-        size_t __l_count {};
-        std::ifstream file(this->argv[1], std::ios::binary | std::ios::ate);
-        std::stringstream buffer;
-
-        buffer << file.rdbuf();
-        for (const char &c : std::string(std::istreambuf_iterator<char> (file),
-                                         std::istreambuf_iterator<char>())) {
-            if (c == '\n') {
-                __l_count++;
-            }
-        }
-        return __l_count;
-    }
     
 #ifdef __AVX512F__
     [[gnu::target("avx512f")]]
@@ -2085,7 +1948,7 @@ class __wc_internal_class {
     *       is invalid or empty.
     */
     __FORCE_INLINE
-    size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+    size_t __wc_line(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
             return 0;
         }
@@ -2135,7 +1998,7 @@ class __wc_internal_class {
     */ 
     [[gnu::target("avx2")]]
     __FORCE_INLINE
-    size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+    size_t __wc_line(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
             std::cerr << "Mapped file is empty" << std::endl;
             return 0;
@@ -2194,7 +2057,7 @@ class __wc_internal_class {
     */
     [[gnu::target("sse2")]]
     __FORCE_INLINE
-    size_t __wc_line_1(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
+    size_t __wc_line(Translation translation = std::identity{}, size_t f_idx = 0) noexcept {
         if (mapped_file.empty() || !mapped_file[f_idx].valid()) {
             return 0;
         }
@@ -2236,7 +2099,7 @@ class __wc_internal_class {
     *
     * @note Optimized for large files; works on all architectures.
     */
-    __FORCE_INLINE size_t __wc_line_1(Translation translation = std::identity {}, size_t f_idx = 0)
+    __FORCE_INLINE size_t __wc_line(Translation translation = std::identity {}, size_t f_idx = 0)
     noexcept {
         size_t __l_count {};
         auto __data = mapped_file[f_idx].as_span();
@@ -2299,7 +2162,7 @@ class __wc_internal_class {
     *
     * @note Linear implementation; may be slower for very large files.
     */
-    size_t __wc_word_0(Translation translation = std::identity{}, size_t f_idx = 0) {
+    size_t __wc_word(Translation translation = std::identity{}, size_t f_idx = 0) {
         size_t __w_count {}, pos = 0;
         auto __data = mapped_file[f_idx].as_span();
         auto __str = std::string_view(__data.data());
@@ -2631,19 +2494,19 @@ class __wc_internal_class {
 
         for (int i = 0; i < mapped_file.size(); ++i) {
             if (count_line) {
-                var = __wc_line_1(__local_transform, i);
+                var = __wc_line(__local_transform, i);
                 mapped_file[i].setLineCnt(var);
                 __max_line_width = std::max(__max_line_width, detail::__int_width(var));
                 total_line += var;
             }
             if (count_word) {
-                var = __wc_word_0(__local_transform, i);
+                var = __wc_word(__local_transform, i);
                 mapped_file[i].setWordCnt(var);
                 __max_word_width = std::max(__max_word_width, detail::__int_width(var));
                 total_word += var;
             }
             if (count_bytes) {
-                var = __wc_char_1(__local_transform, i);
+                var = __wc_char_c(__local_transform, i);
                 mapped_file[i].setBytesCnt(var);
                 __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(var));
                 total_bytes += var;
@@ -2653,128 +2516,6 @@ class __wc_internal_class {
                 mapped_file[i].setCharCnt(var);
                 __max_char_width = std::max(__max_char_width, detail::__int_width(var));
                 total_char += var;
-            }
-        }
-    }
-   
-    /**
-    * @brief Computes line, word, and byte counts in parallel for all mapped files.
-    * 
-    * Each file is processed on a thread pool to calculate counts concurrently.
-    * Per-file counts are updated immediately; totals and column widths are
-    * aggregated after all threads complete.
-    * 
-    * @param __local_transform Optional character translation function (default: identity).
-    */
-    void wc_parallel_0(Translation __local_transform = std::identity{}) {
-        size_t var{};
-        __parse_argv();
-        auto* pool = tp::__wc_thread_pool::Instance();
-        std::vector<std::future<void>> futures;
-
-        for (size_t i = 0; i < mapped_file.size(); ++i) {
-            auto future = pool->submit([this, i, __local_transform]() {
-                size_t var{};
-                if (count_line) {
-                    var = __wc_line_1(__local_transform, i);
-                    mapped_file[i].setLineCnt(var);
-                }
-                if (count_word) {
-                    var = __wc_word_0(__local_transform, i);
-                    mapped_file[i].setWordCnt(var);
-                }
-                if (count_bytes) {
-                    var = __wc_char_1(__local_transform, i);
-                    mapped_file[i].setBytesCnt(var);
-                }
-            });
-
-            futures.push_back(std::move(future));
-        }
-
-        for (auto& future : futures) {
-            future.get();
-        }
-
-        for (const auto& file : mapped_file) {
-            if (count_line) {
-                auto line_cnt = file.getLineCnt();
-                __max_line_width = std::max(__max_line_width, detail::__int_width(line_cnt));
-                total_line += line_cnt;
-            }
-            if (count_word) {
-                auto word_cnt = file.getWordCnt();
-                __max_word_width = std::max(__max_word_width, detail::__int_width(word_cnt));
-                total_word += word_cnt;
-            }
-            if (count_bytes) {
-                auto bytes_cnt = file.getBytesCnt();
-                __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(bytes_cnt));
-                total_bytes += bytes_cnt;
-            }
-        }
-    }
-    
-    /**
-    * @brief Performs word, line, and byte counting in parallel using a thread pool.
-    * 
-    * Each file in `mapped_file` is processed concurrently based on the enabled
-    * count flags (`count_line`, `count_word`, `count_bytes`). After all threads
-    * finish, per-file results are aggregated to update total counts and maximum
-    * column widths.
-    * 
-    * @param __local_transform Optional character translation function (default: identity).
-    */
-    void wc_parallel_operations(Translation __local_transform = std::identity{}) {
-        __parse_argv();
-        auto* pool = tp::__wc_thread_pool::Instance();
-        std::vector<std::future<void>> futures;
-
-        if (count_line) {
-            for (size_t i = 0; i < mapped_file.size(); ++i) {
-                futures.push_back(pool->submit([this, i, __local_transform]() {
-                    auto var = __wc_line_1(__local_transform, i);
-                    mapped_file[i].setLineCnt(var);
-                }));
-            }
-        }
-        if (count_word) {
-            for (size_t i = 0; i < mapped_file.size(); ++i) {
-                futures.push_back(pool->submit([this, i, __local_transform]() {
-                    auto var = __wc_word_0(__local_transform, i);
-                    mapped_file[i].setWordCnt(var);
-                }));
-            }
-        }
-        if (count_bytes) {
-            for (size_t i = 0; i < mapped_file.size(); ++i) {
-                futures.push_back(pool->submit([this, i, __local_transform]() {
-                    auto var = __wc_char_1(__local_transform, i);
-                    mapped_file[i].setBytesCnt(var);
-                }));
-            }
-        }
-
-        for (auto& future : futures) {
-            future.get();
-        }
-
-        // Calculate totals (sequential)
-        for (const auto& file : mapped_file) {
-            if (count_line) {
-                auto line_cnt = file.getLineCnt();
-                __max_line_width = std::max(__max_line_width, detail::__int_width(line_cnt));
-                total_line += line_cnt;
-            }
-            if (count_word) {
-                auto word_cnt = file.getWordCnt();
-                __max_word_width = std::max(__max_word_width, detail::__int_width(word_cnt));
-                total_word += word_cnt;
-            }
-            if (count_bytes) {
-                auto bytes_cnt = file.getBytesCnt();
-                __max_bytes_width = std::max(__max_bytes_width, detail::__int_width(bytes_cnt));
-                total_bytes += bytes_cnt;
             }
         }
     }
@@ -2811,19 +2552,19 @@ class __wc_internal_class {
         if (num_files == 1) {
             size_t var{};
             if (count_line) {
-                var = __wc_line_1(__local_transform, 0);
+                var = __wc_line(__local_transform, 0);
                 mapped_file[0].setLineCnt(var);
                 total_line = var;
                 __max_line_width = detail::__int_width(var);
             }
             if (count_word) {
-                var = __wc_word_0(__local_transform, 0);
+                var = __wc_word(__local_transform, 0);
                 mapped_file[0].setWordCnt(var);
                 total_word = var;
                 __max_word_width = detail::__int_width(var);
             }
             if (count_bytes) {
-                var = __wc_char_1(__local_transform, 0);
+                var = __wc_char_c(__local_transform, 0);
                 mapped_file[0].setBytesCnt(var);
                 total_bytes = var;
                 __max_bytes_width = detail::__int_width(var);
@@ -2884,19 +2625,19 @@ class __wc_internal_class {
                 for (size_t i = chunk_start; i < chunk_end; ++i) {
                     size_t var{};
                     if (count_line) {
-                        var = __wc_line_1(__local_transform, i);
+                        var = __wc_line(__local_transform, i);
                         mapped_file[i].setLineCnt(var);
                         acc.total_line += var;
                         acc.max_line_width = std::max(acc.max_line_width, detail::__int_width(var));
                     }
                     if (count_word) {
-                        var = __wc_word_0(__local_transform, i);
+                        var = __wc_word(__local_transform, i);
                         mapped_file[i].setWordCnt(var);
                         acc.total_word += var;
                         acc.max_word_width = std::max(acc.max_word_width, detail::__int_width(var));
                     }
                     if (count_bytes) {
-                        var = __wc_char_1(__local_transform, i);
+                        var = __wc_char_c(__local_transform, i);
                         mapped_file[i].setBytesCnt(var);
                         acc.total_bytes += var;
                         acc.max_bytes_width = std::max(acc.max_bytes_width, detail::__int_width(var));
@@ -2940,10 +2681,6 @@ class __wc_internal_class {
     }
     
   private:
-#if not defined(__wc_lib_use_std_atomic)
-#define __wc_lib_private_instance
-    static std::optional<__wc_internal_class<BitChar, Translation>> __instance;
-#endif // __wc_lib_use_std_atomic
     static std::shared_mutex lock;
     static std::once_flag wc_flag;
     
@@ -3068,17 +2805,7 @@ class __wc_internal_class {
     }
 };
 
-// If __wc_lib_use_std_atomic is used, (which means
-// another instance has already been declared,
-// from __wc_internal_class::Instance()),
-// do not declare the private member instance.
-
 // Initializing and declaring static member
-#if not defined(__wc_lib_use_std_atomic)
-    template <class BitChar, class Translation>
-    std::optional<__wc_internal_class<BitChar, Translation>>
-    __wc_internal_class<BitChar, Translation>::instance;
-#endif // __wc_lib_use_std_atomic
 #ifndef _WIN32
     template <class BitChar, class Translation>
     std::shared_mutex __wc_internal_class<BitChar, Translation>::lock;
